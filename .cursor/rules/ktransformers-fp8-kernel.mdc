@@ -1,0 +1,89 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers FP8内核优化技术
+
+## 概述
+
+KTransformers是一个用于优化大型语言模型推理性能的框架，其中FP8内核优化是专为DeepSeek-V3和DeepSeek-R1等大型模型设计的特殊技术。本规则详细介绍KTransformers中的FP8内核实现和使用方法。
+
+## FP8内核技术原理
+
+DeepSeek-AI团队为DeepSeek-R1/V3模型提供了FP8 safetensors权重格式。KTransformers利用这一资源，实现了高效的混合精度推理架构：
+
+- **混合量化架构**：
+  - 注意力层和共享专家模块：使用FP8精度以提高计算精度
+  - 专家模块：保留GGML量化（GGUF格式），驻留在CPU以节省GPU内存
+- **内存优化**：实现了约19GB VRAM的高效内存使用
+- **性能提升**：同时保持推理质量的情况下显著提高速度
+
+## 使用方法
+
+### 预合并权重使用
+
+KTransformers团队提供了预合并的混合精度权重，可直接使用：
+
+1. 下载预合并权重：
+```bash
+pip install -U huggingface_hub
+
+# 可选：使用HF镜像加速下载
+# export HF_ENDPOINT=https://hf-mirror.com 
+
+huggingface-cli download --resume-download KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid --local-dir <本地目录>
+```
+
+2. 预合并权重地址：
+   - DeepSeek-V3: [KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid](mdc:https:/huggingface.co/KVCache-ai/DeepSeek-V3)
+   - DeepSeek-R1: [KVCache-ai/DeepSeek-R1-GGML-FP8-Hybrid](mdc:https:/huggingface.co/KVCache-ai/DeepSeek-R1)
+
+### 自行合并权重
+
+如果有本地DeepSeek-R1/V3 fp8 safetensors和gguf权重，可使用合并脚本创建混合精度模型：
+
+```bash
+python merge_tensors/merge_safetensor_gguf.py \
+  --safetensor_path <fp8_safetensor路径> \
+  --gguf_path <gguf文件夹路径> \
+  --output_path <合并输出路径>
+```
+
+参数说明：
+- `--safetensor_path`：FP8 safetensor文件路径
+- `--gguf_path`：量化后的GGUF文件夹路径
+- `--output_path`：合并输出的目标路径
+
+### 运行混合精度模型
+
+使用特定的优化配置文件运行混合精度模型：
+
+```bash
+python ktransformers/local_chat.py \
+  --model_path deepseek-ai/DeepSeek-V3 \
+  --gguf_path <合并权重文件夹> \
+  --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-fp8-linear-ggml-experts.yaml \
+  --cpu_infer <cpu核心数 + 1>
+```
+
+## 技术要求与注意事项
+
+### 硬件要求
+- **GPU**：需要支持FP8计算的GPU（如NVIDIA 4090）
+- **VRAM**：推荐至少19GB可用VRAM
+- **存储**：合并后的模型权重文件较大，需要足够的磁盘空间
+
+### 性能注意事项
+- **首次运行JIT编译**：首次执行会因JIT编译导致时间较长，后续运行将保持优化速度
+- **临时接口**：当前权重加载实现为临时性质，将在未来版本中改进
+- **路径指定**：使用`--gguf_path`参数指向包含合并权重的文件夹
+
+## 技术优势
+
+FP8混合精度技术在KTransformers中提供以下优势：
+1. **内存效率**：通过混合精度策略，在有限VRAM条件下运行大型模型
+2. **计算加速**：利用FP8线性层内核加速计算密集型操作
+3. **质量保证**：关键组件使用更高精度，确保推理质量
+4. **灵活配置**：可根据硬件资源定制不同组件的精度
+

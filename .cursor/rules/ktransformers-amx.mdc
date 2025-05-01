@@ -1,0 +1,95 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers AMX 优化
+
+## 概述
+
+本规则详细介绍KTransformers 0.3版本中的高级矩阵扩展(AMX)优化功能。AMX是Intel为x86架构引入的专门指令扩展，从Sapphire Rapids(第四代至强可扩展处理器)开始支持，可显著加速大规模矩阵计算，尤其适合深度学习推理与机器学习工作负载。
+
+## AMX指令集基础
+
+AMX引入了Tile寄存器的概念，每个CPU核心包含8个专用寄存器(tmm0-tmm7)，每个寄存器最多可存储16行×64字节的数据。主要指令包括：
+
+- **配置指令**：LDTILECFG, STTILECFG, TILERELEASE, TILEZERO
+- **加载/存储指令**：TILELOADD, TILELOADDT1, TILESTORED
+- **INT8计算指令**：TDPBSSD, TDPBUSD, TDPBUUD, TDPBSUD
+- **BF16计算指令**：TDPBF16PS
+
+相比传统指令集，AMX可以在16个CPU周期内执行32,768个乘/加操作，使每个核心每周期完成2048个乘/加操作，是AVX-512的8倍性能。
+
+## KTransformers中的AMX优化技术
+
+### 1. AMX Tiling感知内存布局
+
+为充分发挥AMX性能，KTransformers实现了专为AMX优化的内存布局：
+- 专家权重矩阵被预先重新排列为与AMX Tile寄存器尺寸匹配的子矩阵
+- 子矩阵起始地址对齐到64字节，避免缓存行分裂
+- 根据计算访问模式顺序排列子矩阵，最大化L1/L2缓存命中率
+
+### 2. 缓存友好的AMX内核
+
+优化设计围绕CPU的多级缓存层次结构进行：
+- 专家权重矩阵按列划分为多个任务，动态调度到各线程
+- 在每个任务内，专家权重按行划分为适合L2缓存的块
+- 计算过程中，数据在Tile寄存器或L1缓存中累积，避免额外的内存访问
+
+### 3. 低算术强度场景的AVX-512内核适配
+
+根据计算场景智能切换AMX和AVX-512内核：
+- 长提示预填充阶段自动选择AMX内核(每个专家平均处理超过4个token)
+- 短提示预填充和解码阶段动态切换到AVX-512内核
+- 确保在不同算术强度条件下都能发挥最佳效率
+
+### 4. MoE算子融合和动态调度
+
+为减少调度开销和负载不平衡问题：
+- 将同层中所有专家的同类型矩阵计算融合为统一任务
+- 融合没有数据依赖的Gate和Up投影计算
+- 实现动态任务调度策略，细粒度子任务分布与"任务窃取"机制相结合
+
+## 性能提升
+
+得益于这些优化，KTransformers的AMX内核在Xeon4 CPU上能够实现：
+- 21 TFLOPS的BF16吞吐量
+- 35 TOPS的INT8吞吐量
+- 约为PyTorch通用AMX内核的4倍性能
+
+在Qwen3MoE模型上，工作站场景(Xeon 4 + RTX 4090)下实现了高达347 tokens/s的预填充性能。
+
+## 使用方法
+
+### 检查AMX支持
+
+使用以下命令确认CPU支持AMX：
+```bash
+lscpu | grep -i amx
+```
+
+如果支持，输出应包含`amx-bf16 amx-int8 amx-tile`标志。
+
+### 在KTransformers中启用AMX
+
+通过YAML配置修改启用AMX：
+```yaml
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts
+    kwargs:
+      # ...其他参数...
+      backend: "AMXInt8"  # 或 "AMXBF16" 或 "llamafile"(默认)
+```
+
+### 启动Qwen3MoE模型
+
+使用以下命令运行Qwen3MoE模型：
+```bash
+# AMX后端
+python ktransformers/server/main.py --architectures Qwen3MoeForCausalLM --model_path <model_dir> --gguf_path <gguf_dir> --optimize_config_path ktransformers/optimize/optimize_rules/Qwen3Moe-serve-amx.yaml --backend_type balance_serve
+```
+
+**注意**：当前AMX支持仅支持从BF16 GGUF文件读取权重。
+

@@ -1,0 +1,135 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers ROCm支持（AMD GPU）
+
+## 概述
+
+KTransformers是一个优化大型语言模型推理性能的框架，除了支持NVIDIA GPU外，还提供对AMD GPU的支持。本规则详细介绍KTransformers通过ROCm实现的AMD GPU支持。
+
+## ROCm支持介绍
+
+KTransformers的ROCm支持（测试版）使项目能够在AMD Radeon GPU上运行，扩展了硬件兼容性：
+
+- 针对AMD GPU架构优化
+- 使用ROCm作为CUDA的替代品
+- 已在EPYC 9274F处理器和AMD Radeon 7900xtx GPU上进行测试和开发
+
+## 安装步骤
+
+### 1. 安装ROCm驱动
+
+首先需要为AMD GPU安装正确的ROCm驱动：
+
+```bash
+# 参考AMD官方文档安装ROCm驱动
+# https://rocm.docs.amd.com/projects/radeon/en/latest/docs/install/native_linux/install-radeon.html
+```
+
+### 2. 配置Conda环境
+
+创建并配置Python环境：
+
+```bash
+# 下载Miniconda
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+
+# 创建环境
+conda create --name ktransformers python=3.11
+conda activate ktransformers
+
+# 安装必要库
+conda install -c conda-forge libstdcxx-ng
+
+# 验证GLIBCXX版本（需包含3.4.32）
+strings ~/anaconda3/envs/ktransformers/lib/libstdc++.so.6 | grep GLIBCXX
+```
+
+### 3. 安装ROCm版PyTorch
+
+安装支持ROCm的PyTorch版本：
+
+```bash
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2.4
+pip3 install packaging ninja cpufeature numpy
+```
+
+对于其他ROCm版本，可参考[PyTorch以前的版本](https://pytorch.org/get-started/previous-versions/)。
+
+### 4. 构建KTransformers
+
+克隆并构建KTransformers：
+
+```bash
+# 克隆仓库
+git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init
+
+# 安装依赖
+bash install.sh
+```
+
+## 运行模型
+
+### 24GB VRAM GPU配置
+
+使用为有限VRAM优化的配置：
+
+```bash
+python ktransformers/local_chat.py \
+  --model_path deepseek-ai/DeepSeek-R1 \
+  --gguf_path <gguf文件路径> \
+  --optimize_config_path ktransformers/optimize/optimize_rules/rocm/DeepSeek-V3-Chat.yaml \
+  --cpu_infer <cpu核心数 + 1>
+```
+
+### 40GB+VRAM GPU配置
+
+对于高VRAM GPU，可获得更好性能：
+
+1. 修改优化配置文件：
+   ```yaml
+   # 在DeepSeek-V3-Chat.yaml中替换所有：
+   KLinearMarlin → KLinearTorch
+   ```
+
+2. 执行模型：
+   ```bash
+   python ktransformers/local_chat.py \
+     --model_path deepseek-ai/DeepSeek-R1 \
+     --gguf_path <gguf文件路径> \
+     --optimize_config_path <修改后的yaml路径> \
+     --cpu_infer <cpu核心数 + 1>
+   ```
+
+多GPU场景也可采用类似修改，使用`ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml`配置文件。
+
+## 技术限制
+
+ROCm支持目前有一些限制：
+
+1. **算子兼容性**：ROCm平台不支持Marlin操作
+2. **性能降级**：当前Q8线性实现在AMD GPU上性能较差（测试版限制）
+3. **优化级别**：与NVIDIA CUDA相比，部分优化策略在ROCm上尚未完全实现
+
+## 优化建议
+
+为获取ROCm平台上的最佳性能：
+
+1. **硬件选择**：使用较新的AMD GPU（如Radeon 7900系列）
+2. **内存配置**：对于大型模型，优先选择高VRAM（40GB+）的GPU
+3. **算子选择**：使用KLinearTorch替代KLinearMarlin
+4. **多GPU部署**：对于超大模型，考虑使用多GPU配置
+
+## 未来发展
+
+KTransformers团队计划在未来版本中改进ROCm支持：
+
+- 优化Q8线性算子的性能
+- 增加对更多AMD GPU型号的测试和支持
+- 实现ROCm特定的算子优化
+- 提供更全面的ROCm使用文档
+

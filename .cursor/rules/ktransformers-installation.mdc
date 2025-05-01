@@ -1,0 +1,204 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers 安装和运行指南
+
+## 版本信息
+
+目前KTransformers有两个主要版本：
+- **V0.2** - 当前主分支
+- **V0.3** - 预览版本，目前仅提供二进制分发
+
+## 环境准备
+
+在安装KTransformers前，需要满足以下条件：
+
+1. **CUDA要求**：CUDA 12.1及以上版本
+   ```sh
+   # 将CUDA添加到PATH
+   if [ -d "/usr/local/cuda/bin" ]; then
+       export PATH=$PATH:/usr/local/cuda/bin
+   fi
+   
+   if [ -d "/usr/local/cuda/lib64" ]; then
+       export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
+   fi
+   
+   if [ -d "/usr/local/cuda" ]; then
+       export CUDA_PATH=$CUDA_PATH:/usr/local/cuda
+   fi
+   ```
+
+2. **系统要求**：Linux-x86_64环境，gcc/g++ >= 11，cmake >= 3.25
+   ```sh
+   sudo apt-get update 
+   sudo apt-get install build-essential cmake ninja-build patchelf
+   ```
+
+3. **Python环境**：推荐使用Miniconda3或Anaconda3创建Python=3.11的虚拟环境
+   ```sh
+   conda create --name ktransformers python=3.11
+   conda activate ktransformers
+   conda install -c conda-forge libstdcxx-ng
+   ```
+
+4. **Python依赖**：PyTorch、packaging和ninja
+   ```sh
+   pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+   pip3 install packaging ninja cpufeature numpy
+   ```
+
+5. **Flash-Attention**：从GitHub下载适当版本
+   ```sh
+   # 从 https://github.com/Dao-AILab/flash-attention/releases 下载
+   ```
+
+## 多并发支持
+
+如果需要启用多并发支持，需要安装以下额外依赖：
+```sh
+sudo apt install libtbb-dev libssl-dev libcurl4-openssl-dev libaio1 libaio-dev libgflags-dev zlib1g-dev libfmt-dev
+```
+
+## 安装方法
+
+### 源码编译安装
+
+1. **初始化源代码**
+   ```sh
+   git clone https://github.com/kvcache-ai/ktransformers.git
+   cd ktransformers
+   git submodule update --init --recursive
+   ```
+
+2. **基本安装（Linux）**
+   ```sh
+   bash install.sh
+   ```
+
+3. **双CPU和1T RAM系统安装**
+   ```sh
+   apt install libnuma-dev
+   export USE_NUMA=1
+   bash install.sh  # 或 make dev_install
+   ```
+
+4. **多并发系统安装**
+   ```sh
+   USE_BALANCE_SERVE=1 bash ./install.sh
+   ```
+
+5. **双CPU和1T RAM的多并发系统**
+   ```sh
+   USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
+   ```
+
+6. **Windows安装**（目前推荐使用WSL）
+   ```sh
+   install.bat
+   ```
+
+## 本地聊天测试
+
+提供了简单的命令行本地聊天Python脚本用于测试。这是一个简单的测试工具，仅支持单轮聊天。
+
+### 运行示例
+
+```sh
+# 从克隆的仓库根目录开始
+mkdir DeepSeek-V2-Lite-Chat-GGUF
+cd DeepSeek-V2-Lite-Chat-GGUF
+
+wget https://huggingface.co/mradermacher/DeepSeek-V2-Lite-GGUF/resolve/main/DeepSeek-V2-Lite.Q4_K_M.gguf -O DeepSeek-V2-Lite-Chat.Q4_K_M.gguf
+
+cd ..
+
+# 启动本地聊天
+python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+```
+
+### 命令参数
+
+- `--model_path`（必需）：模型名称或本地路径
+- `--gguf_path`（必需）：包含GGUF文件的目录路径
+- `--optimize_config_path`：包含优化规则的YAML文件路径
+- `--max_new_tokens`：生成的最大新标记数（默认=1000）
+- `--cpu_infer`：用于推理的CPU数量（默认=10）
+
+## 服务器启动
+
+在v0.2.4版本中支持多并发功能。
+
+```sh
+python ktransformers/server/main.py --model_path /mnt/data/models/DeepSeek-V3 --gguf_path /mnt/data/models/DeepSeek-V3-GGUF/DeepSeek-V3-Q4_K_M/ --cpu_infer 62 --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-serve.yaml --port 10002 --chunk_size 256 --max_new_tokens 1024 --max_batch_size 4 --port 10002 --cache_lens 32768 --backend_type balance_serve
+```
+
+### 服务器参数
+
+- `--chunk_size`：引擎在单次运行中处理的最大标记数
+- `--cache_lens`：调度器分配的kvcache的总长度
+- `--backend_type`：`balance_serve`是多并发后端引擎，`ktransformers`是原始单并发引擎
+- `--max_batch_size`：引擎在单次运行中处理的最大请求数（仅由`balance_serve`支持）
+
+## Web UI启动
+
+### 不带网站启动
+
+```sh
+ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002
+```
+
+### 带网站启动
+
+```sh
+ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002 --web True
+```
+
+### 使用transformers启动
+
+```sh
+ktransformers --type transformers --model_path /mnt/data/model/Qwen2-0.5B-Instruct --port 10002 --web True
+```
+
+访问网站：http://localhost:10002/web/index.html#/chat
+
+## 支持的模型和量化格式
+
+### 支持的模型列表
+
+- DeepSeek-R1
+- DeepSeek-V3
+- DeepSeek-V2
+- DeepSeek-V2.5
+- Qwen2-57B
+- DeepSeek-V2-Lite
+- Mixtral-8x7B
+- Mixtral-8x22B
+
+### 支持的量化格式
+
+- IQ1_S
+- IQ2_XXS
+- Q2_K_L
+- Q2_K_XS
+- Q3_K_M
+- Q4_K_M
+- Q5_K_M
+- Q6_K
+- Q8_0
+
+### 推荐的模型和资源需求
+
+| 模型名称                      | 模型大小 | VRAM  | 最小DRAM      | 推荐DRAM   |
+|------------------------------|--------|-------|--------------|--------------|
+| DeepSeek-R1-q4_k_m           | 377G   | 14G   | 382G         | 512G         |
+| DeepSeek-V3-q4_k_m           | 377G   | 14G   | 382G         | 512G         |
+| DeepSeek-V2-q4_k_m           | 133G   | 11G   | 136G         | 192G         |
+| DeepSeek-V2.5-q4_k_m         | 133G   | 11G   | 136G         | 192G         |
+| Qwen2-57B-A14B-Instruct-q4_k_m | 33G  | 8G    | 34G          | 64G          |
+| DeepSeek-V2-Lite-q4_k_m      | 9.7G   | 3G    | 13G          | 16G          |
+| Mixtral-8x7B-q4_k_m          | 25G    | 1.6G  | 51G          | 64G          |
+| Mixtral-8x22B-q4_k_m         | 80G    | 4G    | 86.1G        | 96G          |
+

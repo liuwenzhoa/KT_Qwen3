@@ -1,0 +1,147 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers多并发支持（Balance Serve后端）
+
+## 概述
+
+KTransformers是一个针对大型语言模型推理优化的框架，Balance Serve是其v0.2.4版本引入的关键功能，实现了高效的多并发处理能力。本规则详细介绍KTransformers的Balance Serve后端特性和使用方法。
+
+## v0.2.4版本主要更新
+
+KTransformers v0.2.4版本通过架构重构，实现了多并发支持：
+
+- **代码重构**：更新了超过10,000行代码，重新设计了整个架构
+- **多并发支持**：能够同时处理多个推理请求，提高整体吞吐量
+- **性能提升**：在4路并发测试中，总吞吐量提高约130%
+- **硬件优化**：在英特尔Xeon6+MRDIMM-8800平台上，总输出吞吐量从17 tokens/s提升到40 tokens/s
+
+## 架构设计
+
+Balance Serve采用三层架构设计：
+
+![架构图](https://github.com/user-attachments/assets/f5f001fa-dca7-4377-a01a-32192902aa47)
+
+1. **服务器层**：处理用户请求，提供兼容OpenAI的API接口
+2. **推理引擎层**：执行模型推理，支持分块预填充
+3. **调度器层**：管理任务调度和请求编排，通过FCFS（先来先服务）调度策略组织批处理
+
+关键技术实现：
+- 基于[flashinfer](https://github.com/flashinfer-ai/flashinfer/)实现自定义算子
+- 实现了可变批量大小的CUDA Graph
+- 支持连续批处理技术
+
+## 安装指南
+
+> **注意**：安装此项目将替换环境中的flashinfer，强烈建议创建新的conda环境
+
+### 1. 设置Conda环境
+
+```bash
+# 下载Miniconda
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+
+# 创建环境
+conda create --name ktransformers python=3.11
+conda activate ktransformers
+
+# 安装必要库
+conda install -c conda-forge libstdcxx-ng
+
+# 验证GLIBCXX版本
+strings ~/anaconda3/envs/ktransformers/lib/libstdc++.so.6 | grep GLIBCXX
+```
+
+### 2. 安装依赖
+
+```bash
+sudo apt install libtbb-dev libssl-dev libcurl4-openssl-dev libaio1 libaio-dev libfmt-dev libgflags-dev zlib1g-dev patchelf
+pip3 install packaging ninja cpufeature numpy openai
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+```
+
+### 3. 构建KTransformers
+
+```bash
+# 克隆仓库
+git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+
+# 单NUMA安装
+USE_BALANCE_SERVE=1 bash ./install.sh
+
+# 双NUMA安装(双CPU和1T RAM)
+USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
+```
+
+## 使用方法
+
+### 启动服务器
+
+```bash
+python ktransformers/server/main.py \
+  --port 10002 \
+  --model_path <safetensor配置路径> \
+  --gguf_path <gguf文件路径> \
+  --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-serve.yaml \
+  --max_new_tokens 1024 \
+  --cache_lens 32768 \
+  --chunk_size 256 \
+  --max_batch_size 4 \
+  --backend_type balance_serve \
+  --force_think  # 对DeepSeek-R1有用
+```
+
+### 重要参数说明
+
+- `--max_new_tokens`：每个请求生成的最大令牌数
+- `--cache_lens`：调度器分配的KV缓存总长度，所有请求共享此空间
+- `--max_batch_size`：引擎单次运行处理的最大请求数
+- `--chunk_size`：引擎单次运行处理的最大令牌数
+- `--backend_type`：`balance_serve`为多并发后端，`ktransformers`为原始单并发引擎
+- `--model_path`：safetensor配置路径（仅需要配置文件，不需要模型权重）
+- `--force_think`：强制DeepSeek-R1模型响应推理标签
+
+**参数关系约束**：
+`cache_lens > max_batch_size * max_new_tokens`，否则并发度将降低
+
+### 访问服务
+
+```bash
+curl -X POST http://localhost:10002/v1/chat/completions \
+  -H "accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "hello"}
+    ],
+    "model": "DeepSeek-R1",
+    "temperature": 0.3,
+    "top_p": 1.0,
+    "stream": true
+  }'
+```
+
+## Docker支持
+
+可以使用Docker镜像快速测试v0.2.4版本：
+
+```bash
+docker pull approachingai/ktransformers:v0.2.4-AVX512
+docker run -it --gpus all --privileged --shm-size 64g --name ktrans --network=host -v /mnt:/mnt approachingai/ktransformers:v0.2.4-AVX512 /bin/bash
+
+# 在新终端中连接到容器
+docker exec -it ktrans bash
+```
+
+## 技术细节与贡献者
+
+- **custom_flashinfer** 实现：@Atream @ovowei @qiyuxinlin
+- **balance_serve引擎** 实现：@qiyuxinlin @ovowei
+- **连续批处理调度器** 实现：@ErvinXie
+- v0.2.4版本发布：@Atream @Azure-Tang @ErvinXie @qiyuxinlin @ovowei @KMSorSMS @SkqLiao
+
+

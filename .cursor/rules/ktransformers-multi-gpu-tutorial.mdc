@@ -1,0 +1,129 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers 多GPU使用教程
+
+## 概述
+
+KTransformers是一个灵活的Python框架，能够通过算子注入和设备分配策略优化大型语言模型的推理性能。本规则详细介绍如何使用多GPU配置运行KTransformers，提高资源利用效率。
+
+## 多GPU配置基础
+
+KTransformers支持跨多个GPU分配模型层，在保持模型完整功能的同时提高推理效率。配置多GPU环境需要通过YAML注入规则指定每个模块的设备分配。
+
+### 基本原理
+
+- **层分发策略**：将模型的不同层分配到不同GPU上
+- **设备间数据传输**：自动处理GPU间的数据传输
+- **资源均衡**：根据模型结构和GPU资源优化分配
+
+## 关键配置项
+
+### 1. 模型传输映射配置
+
+首先需要注入`KDeepseekV2Model`算子并配置`transfer_map`参数，该参数定义了层之间的设备切换点：
+
+```yaml
+- match:
+    name: "^model$"
+  replace:
+    class: "ktransformers.operators.models.KDeepseekV2Model"
+    kwargs:
+      transfer_map: 
+        30: "cuda:1"  # 第30层后切换到cuda:1
+```
+
+这个配置表示第0-29层在第一个GPU上运行，第30-59层在第二个GPU上运行。
+
+### 2. 模块设备分配
+
+对于模型中的每个模块类型，都需要指定其运行设备。以`routed experts`模块为例：
+
+#### 单GPU配置
+
+```yaml
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts
+    kwargs:
+      generate_device: "cuda:0"
+      generate_op: "MLPCUDAExperts"
+      out_device: "cuda:0"
+  recursive: False
+```
+
+#### 多GPU配置
+
+```yaml
+# 将0-29层的专家分配到cuda:0
+- match:
+    name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts
+    kwargs:
+      generate_device: "cpu"
+      generate_op: "KExpertsCPU"
+      out_device: "cuda:0"
+  recursive: False
+
+# 将30-59层的专家分配到cuda:1
+- match:
+    name: "^model\\.layers\\.([345][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts
+    kwargs:
+      generate_device: "cpu"
+      generate_op: "KExpertsCPU"
+      out_device: "cuda:1"
+  recursive: False
+```
+
+在多GPU配置中，使用正则表达式匹配不同层范围，将它们分配到相应的GPU上。需要为每类模块(如注意力层、线性层等)创建类似的分配规则。
+
+## 优化VRAM使用
+
+当有多个GPU且VRAM充足时，可以将更多计算密集型组件从CPU移至GPU，进一步提升性能。
+
+### VRAM优化示例
+
+以专家模块为例，如果cuda:0上有额外的60GB VRAM，可以：
+
+```yaml
+# 将第4~8层的专家移至cuda:0并使用Marlin后端
+- match:
+    name: "^model\\.layers\\.([4-8])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts  
+    kwargs:
+      generate_device: "cuda:0"
+      generate_op: "KExpertsMarlin"
+  recursive: False
+
+# 其余层仍使用CPU计算
+- match:
+    name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     
+    kwargs:
+      generate_device: "cpu"
+      generate_op: "KExpertsCPU"
+      out_device: "cuda:0"
+  recursive: False 
+```
+
+## 使用注意事项
+
+1. **规则应用顺序**：YAML中的规则按顺序应用，仅第一个匹配的规则会生效
+2. **专家移至GPU的影响**：
+   - 每个移至GPU的专家会降低加载速度
+   - 需要关闭CUDA graph
+   - 每个专家大约消耗6GB VRAM(以DeepSeek-R1/V3为例)
+3. **自定义配置**：根据具体GPU数量和模型结构调整层分配
+
+## 实际应用
+
+完整的多GPU配置示例可在 [DeepSeek-V3-Chat-multi-gpu.yaml](mdc:ktransformers/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml) 中找到。该示例针对DeepSeek-V3模型进行了优化，可以根据具体需求进行调整。
+

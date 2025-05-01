@@ -1,0 +1,97 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers 中文文档概览
+
+## 项目介绍
+
+KTransformers（发音为 Quick Transformers）旨在通过先进的内核优化和放置/并行策略来增强🤗 Transformers的体验。这是一个以Python为中心的灵活框架，核心是可扩展性。通过用一行代码实现并注入优化模块，用户可以获得以下功能：
+
+- 与Transformers兼容的接口
+- 符合OpenAI和Ollama的RESTful API
+- 简化的类似ChatGPT的Web界面
+
+KTransformers的愿景是成为一个用于实验创新LLM推理优化的灵活平台。
+
+## 最新更新
+
+- **2025年4月9日**：实验性支持LLaMA 4模型
+- **2025年4月2日**：支持多并发
+- **2025年3月15日**：支持AMD GPU的ROCm
+- **2025年3月5日**：支持unsloth 1.58/2.51位权重和IQ1_S/FP8混合权重，支持更长上下文
+- **2025年2月25日**：支持DeepSeek-V3和R1的FP8 GPU内核和更长上下文
+- **2025年2月15日**：支持更长上下文和更快速度
+- **2025年2月10日**：支持Deepseek-R1和V3在有限资源上的运行
+
+## 案例展示
+
+### 本地671B DeepSeek-Coder-V3/R1
+
+使用Q4_K_M版本，仅需14GB VRAM和382GB DRAM即可运行。性能指标：
+
+- **预填充速度**：
+  - KTransformers：54.21 tokens/s（32核）→ 74.362 tokens/s（双插槽，2×32核）→ 255.26 tokens/s（优化的AMX基MoE内核）→ 286.55 tokens/s（选择性使用6个专家）
+  - 与llama.cpp相比：最高达到27.79倍速度提升
+- **解码速度**：
+  - KTransformers：8.73 tokens/s（32核）→ 11.26 tokens/s（双插槽，2×32核）→ 13.69 tokens/s（选择性使用6个专家）
+  - 与llama.cpp相比：最高达到3.03倍速度提升
+
+### 本地236B DeepSeek-Coder-V2
+
+使用Q4_K_M版本，仅需21GB VRAM和136GB DRAM即可运行，性能超过GPT4-0613。
+
+### 速度优化
+
+- 通过MoE卸载和注入来自Llamafile和Marlin的高级内核
+- 实现2K提示预填充126 tokens/s和生成13.6 tokens/s的速度
+
+### VSCode集成
+
+封装成符合OpenAI和Ollama的API，可无缝集成到Tabby和其他前端。
+
+## 快速入门
+
+### 安装
+
+请遵循官方[安装指南][install.md](mdc:ktransformers/doc/zh/install.md)
+
+## 注入框架
+
+KTransformers的核心是一个用户友好的、基于模板的注入框架。这使得研究人员可以轻松地将原始torch模块替换为优化的变体，并简化多种优化的组合过程。
+
+### 示例用法
+
+```python
+with torch.device("meta"):
+    model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+optimize_and_load_gguf(model, optimize_config_path, gguf_path, config)
+...
+generated = prefill_and_generate(model, tokenizer, input_tensor.cuda(), max_new_tokens=1000)
+```
+
+### 自定义模型
+
+可以通过YAML模板文件定义替换规则，例如：
+
+```yaml
+- match:
+    name: "^model\\.layers\\..*$"  # 正则表达式 
+    class: torch.nn.Linear  # 仅匹配同时符合名称和类的模块
+  replace:
+    class: ktransformers.operators.linear.KTransformerLinear  # 量化数据类型的优化内核
+    device: "cpu"   # 初始化时加载该模块的device
+    kwargs:
+      generate_device: "cuda"
+      generate_linear_type: "QuantizedLinearMarlin"
+```
+
+## 致谢和贡献者
+
+KTransformers基于Transformers框架，并受益于GGUF/GGML、Llamafile、Marlin、sglang和flashinfer等高级内核。学MADSys小组和Approaching.AI的成员维护开发。
+
+## 常见问题
+
+
+常见问题解答可在[FAQ文档][FAQ.md](mdc:ktransformers/doc/en/FAQ.md)中找到。

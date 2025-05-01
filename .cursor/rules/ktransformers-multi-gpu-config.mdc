@@ -1,0 +1,210 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers多GPU和服务配置指南
+
+本规则提供KTransformers框架的多GPU和服务配置文件详解，帮助您理解和修改这些YAML配置文件的结构和参数。这些配置文件是在不同硬件环境和使用场景下优化DeepSeek-V3等大型模型推理性能的关键。
+
+## 配置文件概述
+
+KTransformers支持以下主要配置类型：
+
+1. **多GPU配置**：将模型跨多个GPU分布运行，如：
+   - [DeepSeek-V3-Chat-multi-gpu.yaml](mdc:ktransformers/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml) (2 GPU)
+   - [DeepSeek-V3-Chat-multi-gpu-4.yaml](mdc:ktransformers/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu-4.yaml) (4 GPU)
+   - [DeepSeek-V3-Chat-multi-gpu-5.yaml](mdc:ktransformers/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu-5.yaml) (5 GPU)
+
+2. **服务配置**：优化单GPU服务场景，如：
+   - [DeepSeek-V3-Chat-serve.yaml](mdc:ktransformers/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-serve.yaml)
+
+## 配置文件结构
+
+所有配置文件共享类似的结构，由一系列"匹配-替换"规则组成：
+
+```yaml
+- match:               # 匹配条件
+    name: "正则表达式"   # 模块名称匹配模式
+    class: 类名         # 可选：模块类型匹配
+  replace:             # 替换配置
+    class: "替换类"     # 替换为的目标类
+    kwargs:            # 传递给替换类的参数
+      参数1: 值1
+      参数2: 值2
+  recursive: 布尔值     # 可选：是否递归应用到子模块
+```
+
+## 关键配置部分
+
+### 1. 整体模型替换与转移映射
+
+定义模型层如何分布在不同GPU上：
+
+```yaml
+- match:
+    name: "^model$"
+  replace:
+    class: "ktransformers.operators.models.KDeepseekV2Model"
+    kwargs:
+      transfer_map: 
+        30: "cuda:1"  # 第30层后切换到cuda:1
+```
+
+### 2. 专家模块(MoE)配置
+
+混合专家模型(MoE)是DeepSeek-V3的关键特性，每个专家约占6GB VRAM：
+
+```yaml
+- match:
+    name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts
+    kwargs:
+      generate_device: "cpu"        # 生成阶段在CPU上运行(节省VRAM)
+      generate_op: "KExpertsCPU"    # 使用CPU优化的后端
+      out_device: "cuda:0"          # 输出结果发送到GPU 0
+  recursive: False
+```
+
+优化版本可将部分专家放在GPU上以提高性能：
+
+```yaml
+- match:
+    name: "^model\\.layers\\.([4-5])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts
+    kwargs:
+      generate_device: "cuda:0"       # 在GPU上运行
+      generate_op: "KExpertsMarlin"   # 使用GPU优化的Marlin后端
+  recursive: False
+```
+
+### 3. 注意力层配置
+
+注意力机制是Transformer的核心，适合在GPU上加速：
+
+```yaml
+- match:
+    name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.self_attn$"
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention
+    kwargs:
+      generate_device: "cuda:0"      # 在GPU 0上运行
+      prefill_device: "cuda:0"       # 预填充阶段也在GPU 0
+      absorb_for_prefill: False      # 是否启用矩阵吸收优化(降低内存峰值)
+```
+
+服务配置使用`flashinfer_attn`优化器：
+
+```yaml
+- match:
+    name: "^model\\.layers\\..*\\.self_attn$"
+  replace:
+    class: ktransformers.operators.attention.flashinfer_attn
+    kwargs:
+      absorb_for_prefill: False # 改为True启用长上下文支持(预填充可能变慢)
+```
+
+### 4. 线性层配置
+
+线性层是Transformer中最普遍的计算单元：
+
+```yaml
+- match:
+    name: "^model\\.layers\\.([0-9]|1[0-1])\\.(?!self_attn\\.kv_b_proj).*$"
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear
+    kwargs:
+      generate_device: "cuda:0"      # 生成阶段在GPU 0
+      prefill_device: "cuda:0"       # 预填充阶段也在GPU 0
+      generate_op: "KLinearMarlin"   # 生成使用Marlin后端(更快)
+      prefill_op: "KLinearTorch"     # 预填充使用PyTorch后端(更稳定)
+```
+
+服务配置使用`VLinearMarlin`优化器：
+
+```yaml
+- match:
+    name: "^model\\.layers\\.(?!.*self_attn\\.kv_b_proj).*$"
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear
+    kwargs:
+      generate_op: "VLinearMarlin"   # 为服务场景优化的线性操作
+```
+
+### 5. 默认兜底配置
+
+确保所有未明确指定的模块也能放在正确的GPU上：
+
+```yaml
+- match:
+    name: "^model\\.layers\\.([0-9]|1[0-1])\\."
+  replace:
+    class: "default"    # 保持原始类不变
+    kwargs:
+      generate_device: "cuda:0"
+      prefill_device: "cuda:0"
+```
+
+## 不同配置文件的特点
+
+### DeepSeek-V3-Chat-multi-gpu.yaml (2 GPU)
+
+- 使用2个GPU的简单配置
+- 在第30层进行设备切换：`transfer_map: {30: "cuda:1"}`
+- 适合拥有2个GPU(每个至少24GB VRAM)的系统
+
+### DeepSeek-V3-Chat-multi-gpu-4.yaml (4 GPU)
+
+- 使用4个GPU的均衡配置
+- 在第15、30、45层进行设备切换
+- 每个GPU负责约15层处理
+- 适合拥有4个GPU(每个至少16GB VRAM)的系统
+
+### DeepSeek-V3-Chat-multi-gpu-5.yaml (5 GPU)
+
+- 5 GPU高级配置，最优平衡性能与资源
+- 在第12、24、36、48层进行设备切换
+- 针对每个功能模块提供详细注释
+- 对每个GPU区域的专家进行了精细优化
+- 适合拥有5个GPU(每个约32GB VRAM)的高性能系统
+
+### DeepSeek-V3-Chat-serve.yaml
+
+- 单GPU服务优化配置
+- 使用`flashinfer_attn`和`VLinearMarlin`优化器
+- 将大部分专家放在CPU上以节省VRAM
+- `KDeepseekV3MoEV2`和`KTransformersExpertsV2`提供更先进的混合专家处理
+- 适合提供稳定API服务的单GPU系统
+
+## 性能优化建议
+
+1. **专家分配**：
+   - 每个移至GPU的专家模块约占6GB VRAM
+   - 使用GPU专家时必须禁用CUDA Graph：`--use_cuda_graph=False`
+   - 测试不同数量的GPU专家找到最佳平衡点
+
+2. **GPU内存管理**：
+   - 监控每个GPU的内存使用率，避免OOM错误
+   - 适当调整`absorb_for_prefill`参数平衡速度和内存使用
+
+3. **多GPU策略**：
+   - 均匀分配层数到每个GPU
+   - 确保相关层(如同一Transformer块的组件)位于同一GPU上
+   - 尽量减少跨GPU数据传输
+
+## 配置修改指南
+
+修改配置文件时请注意以下几点：
+
+1. **正则表达式**：层号匹配使用正则表达式，如`([0-9]|1[0-1])`匹配0-11层
+2. **设备一致性**：同一层的所有组件应使用相同的GPU
+3. **递归标志**：专家配置通常设置`recursive: False`以避免过度注入
+4. **参数调整**：根据硬件资源和性能需求调整generate_device和prefill_device
+
+通过合理配置，KTransformers能够在有限硬件资源上高效运行DeepSeek-V3等大型模型，提供接近或超越商业API的性能。
+
+

@@ -1,0 +1,94 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers长上下文使用教程
+
+## 概述
+
+本规则提供KTransformers长上下文功能的详细使用指南。KTransformers是一个优化大型语言模型推理性能的框架，其长上下文功能允许在有限硬件资源上处理超长的文本序列。
+
+## 当前支持状态
+
+目前，长上下文功能仅由`local_chat.py`接口支持，与服务器接口的集成正在开发中。
+
+## 模型准备
+
+为方便用户使用，KTransformers团队已将长上下文所需的模型配置、gguf和tokenizer上传至HuggingFace仓库：
+
+访问链接：https://huggingface.co/nilv234/internlm2_5_to_llama_1m/tree/main
+
+## 启动方法
+
+要在24GB VRAM的环境中使用支持1M上下文的InternLM2.5-7B-Chat-1M模型，需要：
+
+1. 设置`model_path`和`gguf_path`指向下载的模型仓库路径
+2. 将模式设置为`"long_context"`
+
+启动命令示例：
+```bash
+python local_chat.py --model_path="/data/model/internlm2_5_to_llama_1m" \
+  --gguf_path="/data/model/internlm2_5_to_llama_1m" \
+  --max_new_tokens=500 \
+  --cpu_infer=10 \
+  --use_cuda_graph=True \
+  --mode="long_context" \
+  --prompt_file="/path/to/file"
+```
+
+## 配置参数说明
+
+首次运行`local_chat.py`后，系统会在`~/.ktransformers`目录下自动创建一个config.yaml文件，其中包含长上下文相关的配置参数：
+
+```yaml
+chunk_size: 4096         # 预填充块大小
+max_seq_len: 100000      # KVCache长度
+block_size: 128          # KVCache块大小
+local_windows_len: 4096  # 存储在GPU上的KVCache长度
+second_select_num: 96    # 预选后每次选择的KVCache块数量
+threads_num: 64          # CPU线程数
+anchor_type: DYNAMIC     # KVCache块代表性token选择方法
+kv_type: FP16            # KV缓存类型
+dense_layer_num: 0       # 不需要填充或选择KVCache的前几层
+anchor_num: 1            # KVCache块内代表性token的数量
+preselect_block: False   # 是否预选
+head_select_mode: SHARED # 所有kv_heads联合选择
+preselect_block_count: 96 # 预选的块数量
+layer_step: 1            # 每隔几层选择一次
+token_step: 1            # 每隔几个token选择一次
+```
+
+用户可以根据自己的需求和硬件资源调整这些参数。
+
+## 内存需求
+
+不同上下文长度对应的DRAM需求如下表所示：
+
+| 上下文长度 | 4K   | 32K  | 64K  | 128K | 512K | 1M     |
+|----------|------|------|------|------|------|--------|
+| DRAM (GB) | 0.5  | 4.29 | 8.58 | 17.1 | 68.7 | 145.49 |
+
+**重要提示**：请根据您的DRAM实际大小选择合适的`max_seq_len`参数值。
+
+## 使用流程
+
+1. 准备好输入文本文件(如果有)，通过`--prompt_file`参数指定
+2. 启动`local_chat.py`，使用上述命令
+3. 当终端显示`chat:`提示时，如果已通过`prompt_file`指定了输入文本，只需按Enter键即可开始处理
+4. 若未指定输入文件，可在`chat:`提示后直接输入文本
+
+## 性能优化建议
+
+- 增加`cpu_infer`参数值可提高处理速度，但应确保不超过实际CPU核心数
+- 调整`chunk_size`和`block_size`可以平衡内存使用和处理效率
+- 对于大型文档处理，建议启用`preselect_block`选项
+- 在资源充足的情况下，可以增加`second_select_num`参数以提高准确性
+
+## 故障排除
+
+如果遇到内存不足错误，可尝试：
+1. 减小`max_seq_len`值
+2. 减小`block_size`值
+3. 确保系统有足够的DRAM和VRAM
+

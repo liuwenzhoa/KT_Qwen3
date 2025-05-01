@@ -1,0 +1,313 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers项目概述
+
+## 项目介绍
+
+KTransformers（Quick Transformers的全称）是一个灵活的Python框架，旨在通过先进的内核优化和放置/并行策略增强大型语言模型的推理性能。该项目的核心目标是降低运行GPT-4/Claude级别大型模型的硬件门槛，使普通开发者能够在有限资源上获得高效推理体验。
+
+## 核心特性
+
+- **低资源运行大型模型**：在有限资源（如24GB VRAM的桌面设备）上运行671B参数的DeepSeek-Coder-V3/R1等大型模型
+- **高效推理性能**：
+  - 预填充速度：最高可达286.55 tokens/s（比llama.cpp快27.79倍）
+  - 解码速度：最高可达13.69 tokens/s（比llama.cpp快3.03倍）
+- **灵活的注入框架**：通过YAML配置文件，轻松替换原始PyTorch模块为优化变体
+- **API兼容性**：提供与OpenAI和Ollama标准兼容的RESTful API
+- **多样化后端**：支持包括Llamafile、Marlin和自定义CUDA内核在内的多种后端
+- **长上下文支持**：在单GPU+CPU配置下支持高达1M token的上下文长度
+- **多GPU支持**：支持模型在多个GPU间的流水线分发
+- **异构加速**：混合CPU/GPU计算实现最优性能
+- **ROCm支持**：在AMD GPU上通过ROCm运行
+
+## 主要优势
+
+1. **开箱即用**：提供简单直观的接口，减少配置复杂度
+2. **强大的优化能力**：通过专家卸载、注入高级内核和NUMA架构优化等技术显著提升性能
+3. **硬件适应性**：从单GPU桌面环境到多节点服务器集群均可部署
+4. **兼容性与扩展性**：兼容现有Transformers生态系统，易于集成到现有项目
+5. **灵活的部署选项**：支持本地聊天、服务器API和Web UI等多种使用模式
+
+## 应用场景
+
+- **本地AI助手**：在个人电脑上运行强大的AI编程助手
+- **私有API服务**：为团队提供兼容OpenAI的本地API服务
+- **大规模文本处理**：处理长文档、代码库分析等需要长上下文的场景
+- **低延迟应用**：需要快速响应的聊天机器人或内容生成应用
+- **资源受限环境**：在有限计算资源的环境中部署大型模型
+
+## 支持的模型
+
+KTransformers支持多种大型语言模型：
+
+- DeepSeek-R1
+- DeepSeek-V3
+- DeepSeek-V2
+- DeepSeek-V2.5
+- Qwen2-57B
+- DeepSeek-V2-Lite
+- Mixtral-8x7B
+- Mixtral-8x22B
+- LLaMA 4 (实验性支持)
+
+## 关键技术组件
+
+### 1. 注入框架
+
+核心是一个基于模板的注入框架，允许研究人员轻松替换原始torch模块为优化变体：
+
+```python
+with torch.device("meta"):
+    model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+optimize_and_load_gguf(model, optimize_config_path, gguf_path, config)
+```
+
+### 2. CPU/GPU混合推理
+
+- 将DeepSeek的MLA操作卸载到GPU，其他计算在CPU上进行
+- 在NUMA架构上"复制"关键矩阵，避免节点间数据传输成本
+
+### 3. Balance Serve后端
+
+KTransformers v0.2.4版本引入的Balance Serve特性实现了高效多并发处理：
+- 三层架构设计（服务器层、推理引擎层、调度器层）
+- 支持连续批处理技术
+- 在4路并发测试中，总吞吐量提高约130%
+
+### 4. 长上下文优化
+
+基于注意力机制稀疏性的长上下文优化策略：
+- KVCache分区管理
+- 块式组织提高效率
+- 选择性计算减少资源需求
+
+## 入门指南
+
+1. **安装**：
+   ```bash
+   git clone https://github.com/kvcache-ai/ktransformers.git
+   cd ktransformers
+   bash install.sh
+   ```
+
+2. **本地聊天**：
+   ```bash
+   python -m ktransformers.local_chat \
+     --model_path deepseek-ai/DeepSeek-V2-Lite-Chat \
+     --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+   ```
+
+3. **启动服务器**：
+   ```bash
+   python ktransformers/server/main.py \
+     --model_path deepseek-ai/DeepSeek-V2-Lite-Chat \
+     --gguf_path /path/to/gguf_files \
+     --port 10002
+   ```
+
+## 项目状态
+
+KTransformers是一个活跃开发的项目，最新更新包括：
+- 实验性支持LLaMA 4模型
+- 增强多并发支持
+- AMD GPU的ROCm支持
+- 支持更长上下文和FP8 GPU内核
+
+## 社区与贡献
+
+KTransformers由kvcache-ai团队及学MADSys小组和Approaching.AI的成员维护开发。项目基于Transformers框架，并受益于多个高级内核项目的贡献。
+
+项目地址：https://github.com/kvcache-ai/ktransformers
+
+## 版本发展历程
+
+KTransformers经历了几个主要版本迭代，每个版本都引入了重要的功能改进：
+
+### V0.2系列
+
+#### V0.2 - 基础版本
+- 首次支持在24GB VRAM上运行DeepSeek-R1/V3
+- 内存消耗：单插槽382G DRAM（至少14GB VRAM）或双插槽1T DRAM
+- 基准性能：双插槽环境下预填充速度97.32 tokens/s，解码速度13.69 tokens/s
+
+#### V0.2.1 - 长上下文优化
+- 上下文长度从4K扩展到8K
+- 速度提升约15%（4K提示下解码速度从13.0提升到14.9 tokens/s）
+
+#### V0.2.2 & V0.2.3 - 更长上下文和FP8内核
+- 集成flashinfer项目支持更长上下文
+- 引入FP8内核优化，采用混合量化架构（注意力和共享专家模块使用FP8精度）
+
+#### V0.2.4 - 多并发支持
+- 重构超过10,000行代码，引入平衡服务架构
+- 在4路并发测试中，总吞吐量提高约130%（从17 tokens/s提升到40 tokens/s）
+- 支持更高的缓存长度和可变批量大小
+
+### V0.3 - 预览版本
+
+- 支持Intel AMX优化和选择性专家激活
+- 内存消耗：644GB DRAM，至少14GB VRAM
+- 预填充速度显著提升（2K提示下可达286.55 tokens/s）
+
+## 技术架构详解
+
+### YAML注入系统
+
+KTransformers的核心技术之一是算子注入系统，使用YAML格式定义替换规则：
+
+```yaml
+- match:
+    name: "^model\\.layers\\..*\\.*$"  # 目标模块名称(正则表达式)
+    class: torch.nn.Linear  # 目标模块类型
+  replace:
+    class: "default" # 替换的算子类名
+    kwargs:
+      generate_device: "cuda:0" # 指定运行设备
+  recursive: True # 是否递归注入子模块
+```
+
+### 支持的算子类型
+
+| 原始模块类型 | 替换算子                | 后端选项                   |
+|-------------|--------------------------|----------------------------|
+| Linear      | KTransformersLinear      | KLinearMarlin, KLinearTorch, KLinearCPUInfer, KLinearFP8 |
+| Experts     | KTransformersExperts     | KExpertsTorch, KExpertsMarlin, KExpertsCPU |
+| Attention   | KDeepseekV2Attention     | -                          |
+| MoE         | KMistralSparseMoEBlock   | -                          |
+| RoPE        | RotaryEmbedding          | -                          |
+
+### Balance Serve架构
+
+多并发支持的三层架构设计：
+
+1. **服务器层**：处理用户请求，提供REST API接口
+2. **推理引擎层**：执行模型推理，支持批量处理
+3. **调度器层**：管理任务调度和请求编排
+
+### 长上下文优化技术
+
+基于CPU稀疏注意力框架的长上下文支持：
+
+1. KVCache分区模式：
+   - Initial部分：序列开头token
+   - Context部分：中间token（稀疏计算目标）
+   - Local部分：序列末尾token
+
+2. 代表性token选择方法：
+   - Max：块内多个token各通道最大值
+   - Mean：块内多个token各通道平均值
+   - Quest：最大值和最小值组合
+   - Dynamic：基于累积注意力分数选择top-k个token
+
+## 最佳实践
+
+### 硬件选择建议
+
+1. **CPU选择**：
+   - 首选支持AVX512指令集的Intel CPU
+   - 多核心CPU提供更好的专家并行性能（推荐32核以上）
+
+2. **GPU选择**：
+   - 显存容量：单卡运行至少14GB，推荐24GB+
+   - 架构：Ampere及以上(RTX 30系列或更新)性能最佳
+
+3. **内存需求**：
+   - DeepSeek-R1/V3：至少382GB DRAM
+   - DeepSeek-V2：至少136GB DRAM
+   - Qwen2-57B：至少34GB DRAM
+   - 具体需求取决于所用模型和量化类型
+
+### 性能优化技巧
+
+1. **CPU效率最大化**：
+   - 使用`--cpu_infer`参数控制分配核心数（建议设为CPU物理核心数-1）
+   - 确保CPU负载不超过90%以获得最佳性能
+
+2. **内存管理**：
+   - 对于长上下文应用，根据DRAM大小合理设置`max_seq_len`
+   - 监控内存使用，避免过度分页
+
+3. **多GPU配置**：
+   - 通过定制YAML配置文件实现模型层在多GPU间的合理分配
+   - 对于显存不足但有多个GPU的情况，使用多GPU配置文件：
+     ```bash
+     --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml
+     ```
+
+4. **量化选择**：
+   - 平衡性能和质量：Q4_K_M通常是性能和质量的良好平衡点
+   - 资源极度受限时可考虑更低精度：Q3_K_M或Q2_K
+   - 注意：更低精度可能影响输出质量
+
+## Docker部署
+
+KTransformers提供官方Docker镜像，简化部署过程：
+
+```bash
+# 拉取镜像
+docker pull approachingai/ktransformers:v0.2.4-AVX512
+
+# 运行容器
+docker run -it --gpus all --privileged --shm-size 64g \
+  --name ktrans --network=host \
+  -v /mnt:/mnt approachingai/ktransformers:v0.2.4-AVX512 /bin/bash
+```
+
+## 项目结构
+
+KTransformers项目包含以下主要目录：
+
+- `.devcontainer/`：开发容器配置
+- `.github/`：GitHub相关配置，包括Issue模板和GitHub Actions工作流
+- `csrc/`：C++源代码
+  - `balance_serve/`：多并发服务相关代码
+  - `custom_marlin/`：Marlin内核优化
+  - `ktransformers_ext/`：C++扩展模块
+- `doc/`：文档
+  - `assets/`：文档资源文件
+  - `basic/`：基础文档
+  - `en/`：英文文档
+  - `zh/`：中文文档
+- `ktransformers/`：主Python包
+  - `configs/`：配置文件
+  - `ktransformers_ext/`：扩展模块
+  - `models/`：模型定义
+  - `operators/`：算子实现
+  - `optimize/`：优化模块
+  - `server/`：服务器实现
+  - `tests/`：测试用例
+  - `util/`：工具函数
+  - `website/`：网站前端
+- `merge_tensors/`：张量合并工具
+- `third_party/`：第三方依赖
+
+## 关键文件
+
+- `README.md`：英文自述文件
+- `README_ZH.md`：中文自述文件
+- `Dockerfile`：Docker构建文件
+- `LICENSE`：授权协议(Apache-2.0)
+- `Makefile`：构建脚本
+- `install.bat`：Windows安装脚本
+- `install.sh`：Linux安装脚本
+- `pyproject.toml`：Python项目配置
+- `setup.py`：安装脚本
+
+## 最新更新
+
+- **2025年4月9日**：实验性支持LLaMA 4模型
+- **2025年4月2日**：支持多并发
+- **2025年3月27日**：支持多并发
+- **2025年3月15日**：支持ROCm在AMD GPU上运行
+- **2025年3月5日**：支持unsloth 1.58/2.51 bits权重和IQ1_S/FP8混合权重，支持DeepSeek-V3和R1的139K更长上下文
+- **2025年2月25日**：为DeepSeek-V3和R1支持FP8 GPU内核，支持更长上下文
+- **2025年2月10日**：支持单GPU(24GB VRAM)/多GPU和382G DRAM运行Deepseek-R1和V3模型，速度提升达3~28倍
+- **2024年8月28日**：支持在InternLM2.5-7B-Chat-1M模型下使用1M上下文，需要24GB VRAM和150GB DRAM
+- **2024年8月28日**：降低DeepseekV2所需VRAM从21G到11G
+- **2024年8月15日**：更新注入和多GPU的详细教程
+- **2024年8月14日**：支持llamafile作为线性后端
+- **2024年8月12日**：支持多GPU；支持新模型：mixtral 8*7B和8*22B；支持q2k、q3k、q5k在GPU上的量化
+- **2024年8月9日**：支持windows原生环境

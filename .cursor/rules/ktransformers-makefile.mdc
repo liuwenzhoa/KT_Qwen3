@@ -1,0 +1,116 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers Makefile使用指南
+
+## 概述
+
+KTransformers项目使用Makefile简化开发流程，为开发者提供了一系列预定义的便捷命令。本规则详细介绍项目Makefile的主要目标及其用法，帮助开发者更高效地参与项目开发。
+
+## 主要目标
+
+### flake_find - 代码风格检查
+
+```bash
+make flake_find
+```
+
+**功能说明**：
+
+此命令会检查`./ktransformers`目录下所有Python文件，列出不符合PEP8标准的错误、警告和严重问题（及其相关代码）。
+
+**实现原理**：
+
+- 使用flake8工具进行代码风格检查
+- 检查结果按严重程度分类显示
+- 当前已将这些问题列表添加到`.flake8`文件的`extend-ignore`部分，使flake8暂时忽略它们
+- 团队计划在未来迭代中逐步解决这些问题
+
+**适用场景**：
+
+- 提交代码前的自检
+- 代码审查阶段
+- 了解项目代码风格标准
+
+### format - 代码自动格式化
+
+```bash
+make format
+```
+
+**功能说明**：
+
+此命令使用black工具格式化`./ktransformers`目录下的所有Python文件，使代码符合项目的格式标准。
+
+**格式化规则**：
+
+- 遵循PEP8标准的基础上，项目在`pyproject.toml`文件中自定义了部分规则
+- 将行长度修改为120字符（默认为88字符）
+- 配置示例：
+  ```toml
+  [tool.black]
+  line-length = 120
+  preview = true
+  unstable = true
+  ```
+
+**适用场景**：
+
+- 写完代码后的格式整理
+- 批量修改后的代码一致性保障
+- 团队协作中统一代码风格
+
+### dev_install - 开发模式安装
+
+```bash
+make dev_install
+```
+
+**功能说明**：
+
+以开发模式安装KTransformers包，使包以可编辑模式安装到Python环境中。
+
+**主要优势**：
+
+- 代码修改后无需重新安装即可生效
+- 适合持续开发和调试过程
+- 方便开发者快速验证代码变更
+
+**建议用法**：
+
+强烈建议所有KTransformers项目开发者使用此方法安装包，以便随时测试代码修改。
+
+## 使用案例
+
+### 标准开发工作流
+
+```bash
+# 克隆仓库
+git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+
+# 开发模式安装
+make dev_install
+
+# 编辑代码
+# ... (修改代码)
+
+# 格式化代码
+make format
+
+# 检查代码风格
+make flake_find
+
+# 提交更改
+git add .
+git commit -m "Your commit message"
+```
+
+## 注意事项
+
+1. 执行`make dev_install`前确保已激活正确的Python环境
+2. 代码提交前建议先执行`make format`和`make flake_find`
+3. 如果需要自定义Makefile，请确保遵循项目的代码风格约定
+

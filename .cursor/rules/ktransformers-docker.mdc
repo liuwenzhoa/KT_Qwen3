@@ -1,0 +1,122 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers Docker使用指南
+
+## 概述
+
+KTransformers提供了官方Docker镜像，方便用户快速部署和测试。本规则详细介绍如何使用Docker容器运行KTransformers，避免复杂的环境配置过程。
+
+## 前提条件
+
+在使用KTransformers的Docker镜像前，请确保：
+
+1. 您的系统已正确安装并运行Docker
+2. 创建一个专用文件夹用于存储大型模型和中间文件（例如 `/mnt/models`）
+3. 如需在Docker中使用GPU，请确保已安装[nvidia-container-toolkit](https://github.com/NVIDIA/nvidia-container-toolkit)
+
+## Docker镜像获取
+
+### 方式一：直接拉取官方镜像
+
+```bash
+docker pull approachingai/ktransformers:0.2.1
+```
+
+**注意事项**：官方镜像是在支持AVX512指令集的CPU上编译的。如果您的CPU不支持AVX512，建议在容器内重新编译并安装ktransformers。
+
+### 方式二：本地构建Docker镜像
+
+如果需要自定义镜像或适配特定环境，可以本地构建：
+
+1. 从ktransformers仓库[Dockerfile](mdc:ktransformers/Dockerfile)下载Dockerfile
+2. 在Dockerfile目录执行构建命令：
+   ```bash
+   docker build -t approachingai/ktransformers:0.2.1 .
+   ```
+
+## 使用Docker运行KTransformers
+
+### 启动容器
+
+```bash
+# 创建并启动容器
+docker run --gpus all -v /path/to/models:/models --name ktransformers -itd approachingai/ktransformers:0.2.1
+
+# 进入容器
+docker exec -it ktransformers /bin/bash
+```
+
+参数说明：
+- `--gpus all`：分配所有可用GPU给容器
+- `-v /path/to/models:/models`：将本地模型目录挂载到容器内的/models目录
+- `--name ktransformers`：设置容器名称
+- `-itd`：以交互式、终端、后台方式运行容器
+
+### 在容器内运行KTransformers
+
+容器内置了KTransformers环境，可以直接运行：
+
+```bash
+python -m ktransformers.local_chat \
+  --gguf_path /models/path/to/gguf_path \
+  --model_path /models/path/to/model_path \
+  --cpu_infer 33
+```
+
+您可以根据需要调整命令参数，例如：
+- `--max_new_tokens`：设置生成的最大token数
+- `--cpu_infer`：设置使用的CPU核心数量（建议略低于实际CPU核心数）
+- `--use_cuda_graph`：启用CUDA图加速
+- `--optimize_config_path`：指定优化配置文件路径
+
+## 高级配置
+
+### 数据持久化
+
+为了保存训练数据或配置，可以使用额外的卷挂载：
+
+```bash
+docker run --gpus all \
+  -v /path/to/models:/models \
+  -v /path/to/configs:/workspace/configs \
+  --name ktransformers -itd approachingai/ktransformers:0.2.1
+```
+
+### 端口映射
+
+如果需要使用KTransformers服务器功能并从主机访问，可以添加端口映射：
+
+```bash
+docker run --gpus all \
+  -v /path/to/models:/models \
+  -p 10002:10002 \
+  --name ktransformers -itd approachingai/ktransformers:0.2.1
+```
+
+## 内存优化
+
+Docker默认可能限制容器内存使用，对于大型模型推理，建议设置足够的内存限制：
+
+```bash
+docker run --gpus all \
+  -v /path/to/models:/models \
+  --shm-size=64g \
+  --memory=256g \
+  --name ktransformers -itd approachingai/ktransformers:0.2.1
+```
+
+## 故障排除
+
+1. 如果遇到CUDA相关错误，请检查nvidia-docker是否正确安装
+2. 如果模型加载失败，确认挂载路径是否正确
+3. 对于CPU不支持AVX512的情况，在容器内重新编译KTransformers：
+   ```bash
+   cd /workspace/ktransformers
+   bash install.sh
+   ```
+
+更多详细操作和高级选项，请参考[README_ZH.md](mdc:ktransformers/README_ZH.md)。
+

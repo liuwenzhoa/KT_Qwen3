@@ -1,0 +1,81 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Qwen3Moe服务优化配置指南
+
+## 概述
+
+[Qwen3Moe-serve.yaml](mdc:ktransformers/ktransformers/optimize/optimize_rules/Qwen3Moe-serve.yaml)是KTransformers框架中用于优化Qwen3 MoE模型在服务场景下性能的配置文件。Qwen3是阿里云开源的大型混合专家模型(MoE)，该配置专为单GPU、大内存服务器环境设计（推荐至少24GB VRAM和128GB RAM）。
+
+## 配置文件结构
+
+配置文件采用YAML格式，包含多个匹配-替换规则，每条规则由以下部分组成：
+
+```yaml
+- match:           # 匹配条件，指定要替换的模块
+    name: "正则表达式"  # 模块名称匹配模式
+    class: 类名     # 模块类型匹配
+  replace:         # 替换配置
+    class: "替换类"  # 替换为的目标类
+    kwargs:        # 传递给替换类的参数
+      参数1: 值1
+      参数2: 值2
+  recursive: 布尔值  # 是否递归应用到子模块
+```
+
+## 主要优化策略
+
+配置文件实现了以下关键优化策略：
+
+### 1. 计算设备分配
+- 将大部分计算放在GPU上加速处理
+- 将专家模块生成阶段放在CPU上执行，节省GPU内存
+- 将词嵌入层放在CPU上，因为它只在输入时使用一次
+
+### 2. 模块替换优化
+- 使用`RotaryEmbedding`替换原始`Qwen2MoeRotaryEmbedding`提高位置编码效率
+- 将线性层替换为优化的`KTransformersLinear`实现
+- 使用`KQwen3MoeSparseMoeBlockV2`替换原始MoE模块，提供更好的专家管理
+- 将注意力机制替换为专门针对Qwen3优化的`KQwen3MoeAttention`
+
+### 3. 后端选择策略
+- 生成阶段线性层使用`KLinearMarlin`后端以提高性能
+- 预填充阶段使用`KLinearTorch`后端以确保稳定性
+- 专家计算使用`KExpertsCPU`作为生成后端，`KExpertsTorch`作为预填充后端
+
+### 4. 内存优化
+- 设置`per_layer_prefill_intput_threshold: 0`关闭逐层预填充，降低内存波动
+- 使用门控负载均衡，避免专家计算负载不均
+- 将专家执行结果直接发送回GPU，减少不必要的数据传输
+
+## 典型使用场景
+
+该配置文件主要用于以下场景：
+
+1. 单GPU服务器部署Qwen3 MoE模型提供推理服务
+2. 使用KTransformers的服务API构建兼容OpenAI的本地API
+3. 作为构建更多自定义Qwen3优化配置的基础和参考
+
+## 使用示例
+
+```bash
+python ktransformers/server/main.py \
+  --architectures Qwen3MoeForCausalLM \
+  --model_path <model_path> \
+  --gguf_path <gguf_path> \
+  --optimize_config_path ktransformers/optimize/optimize_rules/Qwen3Moe-serve.yaml \
+  --max_new_tokens 1024 \
+  --cache_lens 32768 \
+  --chunk_size 256 \
+  --max_batch_size 4 \
+  --port 10002 \
+  --backend_type balance_serve
+```
+
+## 相关配置文件
+
+- [DeepSeek-V3-Chat-serve.yaml](mdc:ktransformers/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-serve.yaml) - DeepSeek-V3服务优化配置
+- [DeepSeek-V3-Chat-multi-gpu-5.yaml](mdc:ktransformers/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu-5.yaml) - DeepSeek-V3多GPU分布式配置
+

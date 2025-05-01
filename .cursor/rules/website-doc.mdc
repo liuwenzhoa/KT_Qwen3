@@ -1,0 +1,25 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# 网站服务搭建与编译指南
+
+本规则对应的文档为 [website.md](mdc:ktransformers/doc/zh/api/server/website.md)。
+
+## 内容概述
+- 该文档详细介绍了如何在本项目中搭建和运行Web服务，包括：
+  - Node.js环境安装（推荐使用Nodesource仓库获取新版本）
+  - 前端代码编译流程（Vue CLI安装与构建）
+  - 如何将前端与主项目一同安装
+- 所有命令均为官方推荐，适用于大多数Linux环境。
+
+## 适用场景
+- 需要本地或服务器部署KTransformers Web界面时，参考本指南进行环境准备和前端编译。
+- 适合初次部署、环境迁移或遇到前端相关问题时查阅。
+
+## 相关文件引用
+- [website.md](mdc:ktransformers/doc/zh/api/server/website.md)（本规则对应的官方中文指南）
+
+
+

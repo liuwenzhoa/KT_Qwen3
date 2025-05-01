@@ -1,0 +1,78 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers长上下文支持
+
+## 概述
+
+KTransformers实现了可在有限资源下处理超长上下文序列的推理功能。通过利用注意力机制的稀疏性和异构CPU/GPU系统，在单个24GB GPU配合CPU/DRAM支持下，成功实现128K甚至1M token上下文的高效推理。
+
+## 关键特性
+
+- **128K上下文**：生成速度比llama.cpp快7.1倍
+- **1M上下文**：在24GB GPU上实现16 tokens/s的推理速度，比llama.cpp快近10倍
+- **保持精度**：在"针中寻草"等评估场景中保持或超越原始模型的准确率
+- **异构加速**：充分利用CPU/GPU混合架构实现性能最大化
+
+## 技术原理
+
+### 长文本推理的挑战与解决方案
+
+长文本推理面临的主要挑战是KVCache占用的巨大内存。例如，InternLM2.5-7B-Chat-1M模型虽然权重仅需15.49GB GPU内存，但1M token的KVCache需要额外145.49GB内存，超出本地用户的硬件能力。
+
+KTransformers解决方案基于以下发现：
+1. **注意力分布的稀疏性**：在长文本中，不到5%的token具有较高的注意力分数
+2. **选择性计算**：只需扫描最相关的token子集即可获得与原始结果相近的输出
+
+### CPU稀疏注意力框架
+
+KTransformers实现了一个灵活的CPU稀疏注意力框架，主要特点：
+
+- **KVCache分区管理**：将输入提示分为Initial、Context和Local三部分
+- **块式组织**：以固定大小的块管理KVCache，提高选择和计算效率
+- **代表性token选择**：支持多种选择代表性token的方法（Max、Mean、Quest等）
+- **预选机制**：使用SnapKV方法预先选择相关块，减少推理过程中的计算开销
+
+## 框架架构
+
+![KTransformers_long_context_v2.png](mdc:ktransformers/doc/assets/KTransformers_long_context_v2.png)
+
+KTransformers长上下文框架提供丰富的配置选项：
+- `threads_num`：CPU线程数
+- `block_size`：KVCache块大小
+- `local_windows_len`：提示结束窗口大小
+- `preselect_block_count`：预选块数量
+- `second_block_count`：预选后选择的块数量
+- `representative_type`：选择代表性token的方法
+- `representative_num`：代表性token的数量
+- `layer_step`：KVCache的层选择间隔
+- `token_step`：KVCache的token选择间隔
+- 等更多参数
+
+## 使用方法
+
+目前，长上下文功能仅由`local_chat.py`接口支持，使用步骤：
+
+1. 从HuggingFace下载相关模型：https://huggingface.co/nilv234/internlm2_5_to_llama_1m/tree/main
+
+2. 启动命令：
+```bash
+python local_chat.py --model_path="/path/to/repo" --gguf_path="/path/to/repo" --max_new_tokens=500 --cpu_infer=10 --use_cuda_graph=True --mode="long_context" --prompt_file="/path/to/file"
+```
+
+3. 首次运行后，`~/.ktransformers`目录下将自动创建config.yaml配置文件，可根据需要调整相关参数
+
+不同上下文长度对应的DRAM需求：
+
+| 上下文长度 | 4K  | 32K  | 64K  | 128K | 512K | 1M    |
+|---------|-----|------|------|------|------|-------|
+| DRAM (GB) | 0.5 | 4.29 | 8.58 | 17.1 | 68.7 | 145.49 |
+
+## 注意事项
+
+- 硬件资源影响可用的最大上下文长度，请根据DRAM大小选择合适的`max_seq_len`
+- 首次运行时会有额外的编译和初始化时间
+- 在试验不同参数配置时，注意观察准确率与速度的平衡
+

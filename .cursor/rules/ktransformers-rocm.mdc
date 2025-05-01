@@ -1,0 +1,169 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# KTransformers ROCm支持指南
+
+## 概述
+
+KTransformers已实现对AMD GPU上ROCm的支持，使用户能够在AMD MI系列GPU上部署和运行大语言模型。本规则文件详细介绍KTransformers的ROCm支持特性、安装步骤和常见问题解答。
+
+## 支持功能
+
+- **模型支持**：DeepSeek系列、Mixtral系列和Qwen 2系列模型
+- **量化格式**：支持Q4_K_M和其他GGUF量化格式
+- **ROCm版本**：推荐使用ROCm 5.6或更高版本
+- **AMD GPU**：经过测试支持MI210和MI250上的推理
+
+## 安装指南
+
+### 前提条件
+
+1. **ROCm环境**：确保已正确安装ROCm（推荐5.6+版本）
+2. **CMake**：需要版本3.24或更高
+3. **编译器**：GCC 11或更高版本
+4. **Python环境**：Python 3.10或3.11
+
+### 安装步骤
+
+#### 1. 创建conda环境
+
+```bash
+conda create -n ktransformers-rocm python=3.11
+conda activate ktransformers-rocm
+```
+
+#### 2. 安装PyTorch ROCm版本
+
+```bash
+# 对于ROCm 5.6
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm5.6
+```
+
+#### 3. 安装其他依赖
+
+```bash
+pip install ninja safetensors einops transformers packaging protobuf pyyaml
+```
+
+#### 4. 克隆KTransformers仓库
+
+```bash
+git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+```
+
+#### 5. 安装KTransformers
+
+```bash
+# 使用ROCm专用安装脚本
+USE_ROCM=1 bash install.sh
+```
+
+## 使用指南
+
+### 本地聊天
+
+```bash
+python -m ktransformers.local_chat \
+  --model_path deepseek-ai/DeepSeek-V2-Lite-Chat \
+  --gguf_path /path/to/DeepSeek-V2-Lite-GGUF/ \
+  --optimize_config_path ktransformers/optimize/optimize_rules/rocm/DeepSeek-V2-Lite-Chat-rocm.yaml
+```
+
+### 启动服务器
+
+```bash
+python ktransformers/server/main.py \
+  --model_path deepseek-ai/DeepSeek-V2-Lite-Chat \
+  --gguf_path /path/to/DeepSeek-V2-Lite-GGUF/ \
+  --optimize_config_path ktransformers/optimize/optimize_rules/rocm/DeepSeek-V2-Lite-Chat-rocm.yaml \
+  --port 10002
+```
+
+### 重要参数
+
+- `--optimize_config_path`：指定ROCm专用优化规则路径
+- `--use_rocm`：显式启用ROCm支持（大多数情况下不需要，会自动检测）
+- `--use_flash_attn`：启用FlashAttention支持（如果可用）
+
+## ROCm优化配置
+
+KTransformers提供了专门针对ROCm的优化配置文件，位于`ktransformers/optimize/optimize_rules/rocm/`目录。这些配置文件针对AMD GPU进行了优化，包括：
+
+1. **专用ROCM规则**：针对不同模型的ROCm专用规则文件
+2. **操作符调整**：优化的ROCm操作符实现
+3. **内存管理**：针对AMD GPU的内存使用模式优化
+
+示例优化配置（DeepSeek-V2-Lite-Chat-rocm.yaml）：
+
+```yaml
+- match:
+    name: "^model\\.layers\\..*\\.self_attn$"
+  replace:
+    class: ktransformers.operators.attention.KDeepSeekLiteAttention
+    kwargs:
+      generate_device: "rocm"
+      prefill_device: "rocm"
+      absorb_for_prefill: True
+
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.down_proj$"
+  replace:
+    class: ktransformers.operators.linear.KTransformerLinear
+    device: "rocm" 
+    kwargs:
+      generate_device: "rocm"
+      absorb_for_prefill: True
+```
+
+## 性能表现
+
+在AMD MI210和MI250 GPU上的测试性能：
+
+| 模型 | 设备 | 预填充速度 | 解码速度 |
+|---|---|---|---|
+| DeepSeek-V2-Lite-Q4_K_M | MI250 (1卡) | 约 65 tokens/s | 约 40 tokens/s |
+| DeepSeek-V2-Lite-Q4_K_M | MI210 (1卡) | 约 40 tokens/s | 约 25 tokens/s |
+| Mixtral-8x7B-Q4_K_M | MI250 (1卡) | 约 15 tokens/s | 约 8 tokens/s |
+
+## 常见问题
+
+### 1. ROCm环境问题
+
+**问题**：安装后提示找不到HIP库或ROCM相关错误
+**解决方案**：
+- 检查ROCm环境变量：`echo $ROCM_PATH`
+- 确认pytorch正确安装：`python -c "import torch; print(torch.cuda.is_available())"`
+- 重新安装时使用：`USE_ROCM=1 bash install.sh`
+
+### 2. 内存管理
+
+**问题**：显存溢出或OOM错误
+**解决方案**：
+- 尝试减小批处理大小：`--max_batch_size 1`
+- 使用低精度量化：Q3_K_M或Q2_K
+- 确保系统内存足够（建议32GB+）
+
+### 3. 性能问题
+
+**问题**：推理速度慢于预期
+**解决方案**：
+- 确保使用ROCm专用优化规则
+- 尝试更改`--chunk_size`参数（通常64-256之间）
+- 检查是否启用了合适的操作符替换
+
+## 开发状态
+
+ROCm支持处于积极开发阶段，并计划在未来版本中进一步优化：
+
+- 增强对FlashAttention-2的ROCm支持
+- 改进更大模型（如DeepSeek-V3）的性能
+- 为MOE模型添加专门的优化
+
+## 贡献者
+
+ROCm支持的主要贡献者：@wh201906、@qiyuxinlin、@Azure-Tang、@ovowei
+
