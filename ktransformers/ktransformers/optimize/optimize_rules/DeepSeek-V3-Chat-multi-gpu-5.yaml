@@ -1,0 +1,546 @@
+# DeepSeek-V3 5GPU分布式配置文件
+# 此配置将DeepSeek-V3大语言模型(约60层Transformer)分布在5个GPU上运行
+# DeepSeek-V3是一个大型混合专家模型(MoE)，包含Transformer层、注意力机制和专家层
+# 适用于5x32GB GPU + 450GB内存的服务器环境
+
+# === 嵌入层配置 ===
+# 嵌入层是模型的第一层，负责将输入的token ID转换为向量表示
+# 将词嵌入层放在CPU上以节省GPU内存，因为它只在输入时使用一次
+- match:
+    name: "^model.embed_tokens"  # 匹配模型的词嵌入层
+  replace:
+    class: "default"             # 保持原始类不变，只修改运行设备
+    kwargs:
+      generate_device: "cpu"     # 生成文本阶段在CPU上运行
+      prefill_device: "cpu"      # 处理输入提示阶段也在CPU上运行
+
+# === 转移映射配置 ===
+# 这是分布式推理的核心部分，定义了模型各层如何分布到不同GPU上
+# DeepSeek-V3模型有约60层Transformer层，这里将它们均匀分到5个GPU
+- match:
+    name: "^model$"              # 匹配整个模型对象
+  replace:
+    class: "ktransformers.operators.models.KDeepseekV2Model"  # 替换为KTransformers专用模型类
+    kwargs:
+      per_layer_prefill_intput_threshold: 0  # 关闭逐层预填充以避免额外内存消耗
+      transfer_map:  # 定义模型各Transformer层在不同GPU上的分配方案（模型总共约60层）
+        12: "cuda:1"  # 从第12层开始使用GPU 1（即第0-11层用GPU 0计算）
+        24: "cuda:2"  # 从第24层开始使用GPU 2（即第12-23层用GPU 1计算）
+        36: "cuda:3"  # 从第36层开始使用GPU 3（即第24-35层用GPU 2计算）
+        48: "cuda:4"  # 从第48层开始使用GPU 4（即第36-47层用GPU 3计算，第48-60层用GPU 4计算）
+
+# === 专家层配置 ===
+# 专家层(MoE)是DeepSeek-V3最特别的部分，也是最占内存的部分，每一层有多个"专家"神经网络，但每次只激活少数几个
+
+# 1.定义默认策略：大部分专家的生成阶段放在CPU上以节省GPU内存，但预填充阶段放在GPU上加速处理
+# 先提供一个适用于所有层的默认配置（使用.*匹配任意层号），然后在后续规则中为特定层区域提供更具体的配置
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"  # 匹配所有Transformer层的MLP专家模块(".*"表示任意层号)
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2  # 替换为优化的专家实现
+    kwargs:
+      prefill_device: "cuda:0"      # 预填充阶段在GPU上执行以加速
+      prefill_op: "KExpertsTorch"   # 预填充使用PyTorch后端
+      generate_device: "cpu"        # 生成阶段仍在CPU上执行以节省GPU内存
+      generate_op: "KExpertsCPU"    # 使用专为CPU优化的专家后端
+      out_device: "cuda:0"          # 计算结果发送到GPU 0继续后续计算
+  recursive: False  # 不递归处理子模块，避免过度注入造成配置冲突
+
+# === 为每个GPU区域设置正确的专家层配置 ===
+# 虽然专家生成计算在CPU上，但预填充放在对应GPU上加速，且结果需要发送到正确的GPU继续处理
+# 下面5组配置确保每组专家的预填充和输出被发送到对应的GPU上，每个GPU均衡处理约12层
+
+# GPU 0负责处理的层(0-11层)的专家设置
+- match:
+    name: "^model\\.layers\\.([0-9]|1[0-1])\\.mlp\\.experts$"  # 匹配0-11层的专家模块，共12层
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      prefill_device: "cuda:0"      # 预填充阶段在GPU 0上执行以加速
+      prefill_op: "KExpertsTorch"   # 预填充使用PyTorch后端
+      generate_device: "cpu"        # 生成阶段在CPU上执行以节省GPU内存
+      generate_op: "KExpertsCPU"    # 使用专为CPU优化的专家后端
+      out_device: "cuda:0"          # 计算结果发送到GPU 0继续后续计算
+  recursive: False
+
+# GPU 1负责处理的层(12-23层)的专家设置
+- match:
+    name: "^model\\.layers\\.(1[2-9]|2[0-3])\\.mlp\\.experts$"  # 匹配12-23层的专家模块，共12层
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      prefill_device: "cuda:1"      # 预填充阶段在GPU 1上执行以加速
+      prefill_op: "KExpertsTorch"   # 预填充使用PyTorch后端
+      generate_device: "cpu"        # 生成阶段在CPU上执行以节省GPU内存
+      generate_op: "KExpertsCPU"    # 使用专为CPU优化的专家后端
+      out_device: "cuda:1"          # 计算结果发送到GPU 1，与这些层所在的GPU一致
+  recursive: False
+
+# GPU 2负责处理的层(24-35层)的专家设置
+- match:
+    name: "^model\\.layers\\.(2[4-9]|3[0-5])\\.mlp\\.experts$"  # 匹配24-35层的专家模块，共12层
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      prefill_device: "cuda:2"      # 预填充阶段在GPU 2上执行以加速
+      prefill_op: "KExpertsTorch"   # 预填充使用PyTorch后端
+      generate_device: "cpu"        # 生成阶段在CPU上执行以节省GPU内存
+      generate_op: "KExpertsCPU"    # 使用专为CPU优化的专家后端
+      out_device: "cuda:2"          # 计算结果发送到GPU 2，与这些层所在的GPU一致
+  recursive: False
+
+# GPU 3负责处理的层(36-47层)的专家设置
+- match:
+    name: "^model\\.layers\\.(3[6-9]|4[0-7])\\.mlp\\.experts$"  # 匹配36-47层的专家模块，共12层
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      prefill_device: "cuda:3"      # 预填充阶段在GPU 3上执行以加速
+      prefill_op: "KExpertsTorch"   # 预填充使用PyTorch后端
+      generate_device: "cpu"        # 生成阶段在CPU上执行以节省GPU内存
+      generate_op: "KExpertsCPU"    # 使用专为CPU优化的专家后端
+      out_device: "cuda:3"          # 计算结果发送到GPU 3，与这些层所在的GPU一致
+  recursive: False
+
+# GPU 4负责处理的层(48-60层)的专家设置
+- match:
+    name: "^model\\.layers\\.(4[8-9]|5[0-9]|60)\\.mlp\\.experts$"  # 匹配48-60层的专家模块，共13层
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      prefill_device: "cuda:4"      # 预填充阶段在GPU 4上执行以加速
+      prefill_op: "KExpertsTorch"   # 预填充使用PyTorch后端
+      generate_device: "cpu"        # 生成阶段在CPU上执行以节省GPU内存
+      generate_op: "KExpertsCPU"    # 使用专为CPU优化的专家后端
+      out_device: "cuda:4"          # 计算结果发送到GPU 4，与这些层所在的GPU一致
+  recursive: False
+
+# === 性能优化：每个GPU放置少量高频专家以提高性能 ===
+# 虽然大多数专家计算放在CPU上，但为了提高关键层的性能，我们选择性地将少量专家放在GPU上
+# 这是一种权衡策略：每个GPU只选择1-2层专家移至GPU以避免显存不足
+# 每个专家层约占6GB显存，所以要谨慎选择
+
+# GPU 0: 选择性地将第4-5层的专家放在GPU上加速
+- match:
+    name: "^model\\.layers\\.([4-5])\\.mlp\\.experts$"  # 只匹配第4和第5层的专家模块
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      generate_device: "cuda:0"       # 改为在GPU 0上运行而非CPU
+      generate_op: "KExpertsMarlin"   # 使用GPU专用的Marlin后端加速
+  recursive: False
+
+# GPU 1: 选择性地将第15-16层的专家放在GPU上加速
+- match:
+    name: "^model\\.layers\\.(1[5-6])\\.mlp\\.experts$"  # 只匹配第15和第16层的专家模块
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      generate_device: "cuda:1"       # 改为在GPU 1上运行而非CPU
+      generate_op: "KExpertsMarlin"   # 使用GPU专用的Marlin后端加速
+  recursive: False
+
+# GPU 2: 选择性地将第27-28层的专家放在GPU上加速
+- match:
+    name: "^model\\.layers\\.(2[7-8])\\.mlp\\.experts$"  # 只匹配第27和第28层的专家模块
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      generate_device: "cuda:2"       # 改为在GPU 2上运行而非CPU
+      generate_op: "KExpertsMarlin"   # 使用GPU专用的Marlin后端加速
+  recursive: False
+
+# GPU 3: 选择性地将第40-41层的专家放在GPU上加速
+- match:
+    name: "^model\\.layers\\.(4[0-1])\\.mlp\\.experts$"  # 只匹配第40和第41层的专家模块
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      generate_device: "cuda:3"       # 改为在GPU 3上运行而非CPU
+      generate_op: "KExpertsMarlin"   # 使用GPU专用的Marlin后端加速
+  recursive: False
+
+# GPU 4: 选择性地将第52-53层的专家放在GPU上加速
+- match:
+    name: "^model\\.layers\\.(5[2-3])\\.mlp\\.experts$"  # 只匹配第52和第53层的专家模块
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      generate_device: "cuda:4"       # 改为在GPU 4上运行而非CPU
+      generate_op: "KExpertsMarlin"   # 使用GPU专用的Marlin后端加速
+  recursive: False
+
+# === Rotary Embedding配置 ===
+# Rotary Position Embedding (RoPE)是DeepSeek-V3模型中的关键位置编码机制
+# RoPE通过对注意力计算中的查询和键向量应用旋转变换，实现对token相对位置的编码
+# 这种方式比传统位置编码更有效，特别是在处理长文本和外推到未见过的序列长度时
+# 在多GPU配置中，每个RoPE模块必须放在与其对应层相同的GPU上，以最小化设备间数据传输
+
+# GPU 0负责处理的层(0-11层)的RoPE配置
+- match:
+    name: "^model\\.layers\\.([0-9]|1[0-1])\\."  # 匹配0-11层的RoPE模块
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding  # 匹配DeepSeek模型原始RoPE实现
+  replace:
+    class: ktransformers.operators.RoPE.YarnRotaryEmbeddingV3  # 替换为优化的YaRN实现(YaRN: Yet Another RoPE extensioN)
+    kwargs:
+      generate_device: "cuda:0"  # 在生成阶段使用GPU 0处理
+      prefill_device: "cuda:0"   # 在预填充阶段也使用GPU 0处理，保持一致性
+
+# GPU 1负责处理的层(12-23层)的RoPE配置
+- match:
+    name: "^model\\.layers\\.(1[2-9]|2[0-3])\\."  # 匹配12-23层的RoPE模块
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.YarnRotaryEmbeddingV3  # YaRN通过调整频率缩放提供更好的长文本处理能力
+    kwargs:
+      generate_device: "cuda:1"  # 在生成阶段使用GPU 1处理
+      prefill_device: "cuda:1"   # 在预填充阶段也使用GPU 1处理，确保数据在同一设备上
+
+# GPU 2负责处理的层(24-35层)的RoPE配置
+- match:
+    name: "^model\\.layers\\.(2[4-9]|3[0-5])\\."  # 匹配24-35层的RoPE模块
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.YarnRotaryEmbeddingV3  # 优化的实现减少了计算开销并提高了数值稳定性
+    kwargs:
+      generate_device: "cuda:2"  # 在生成阶段使用GPU 2处理
+      prefill_device: "cuda:2"   # 在预填充阶段也使用GPU 2处理，减少不必要的数据移动
+
+# GPU 3负责处理的层(36-47层)的RoPE配置
+- match:
+    name: "^model\\.layers\\.(3[6-9]|4[0-7])\\."  # 匹配36-47层的RoPE模块
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.YarnRotaryEmbeddingV3  # 这种实现对缓存友好，减少内存带宽压力
+    kwargs:
+      generate_device: "cuda:3"  # 在生成阶段使用GPU 3处理
+      prefill_device: "cuda:3"   # 在预填充阶段也使用GPU 3处理，保持设备一致性
+
+# GPU 4负责处理的层(48-60层)的RoPE配置
+- match:
+    name: "^model\\.layers\\.(4[8-9]|5[0-9]|60)\\."  # 匹配48-60层的RoPE模块
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.YarnRotaryEmbeddingV3  # 支持更长上下文的位置编码实现
+    kwargs:
+      generate_device: "cuda:4"  # 在生成阶段使用GPU 4处理
+      prefill_device: "cuda:4"   # 在预填充阶段也使用GPU 4处理，确保高效的内存利用
+
+# === 线性层配置 ===
+# 线性层(Linear)是Transformer模型中最基础也是最普遍的计算单元，负责向量空间变换
+# 在DeepSeek-V3模型中，线性层用于多种功能：投影查询/键/值向量、MLP中间变换、输出层映射等
+# 注意这里的正则表达式(?!self_attn\\.kv_b_proj)作用是排除self_attn.kv_b_proj，因为该部分需要特殊处理
+# 通过将线性层优化为KTransformersLinear，同时使用高效后端，可显著提高计算性能
+
+# GPU 0负责处理的层(0-11层)的线性层设置
+- match:
+    name: "^model\\.layers\\.([0-9]|1[0-1])\\.(?!self_attn\\.kv_b_proj).*$"  # 匹配0-11层的线性层，排除kv_b_proj
+    class: torch.nn.Linear  # 只匹配PyTorch原生线性层类型
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # 替换为优化的线性层实现
+    kwargs:
+      generate_device: "cuda:0"      # 生成阶段在GPU 0上执行线性变换
+      prefill_device: "cuda:0"       # 预填充阶段也在GPU 0上执行，确保设备一致性
+      generate_op: "KLinearMarlin"   # 生成阶段使用性能更高的Marlin后端，基于CUTLASS优化
+      prefill_op: "KLinearTorch"     # 预填充阶段使用标准PyTorch实现，提高稳定性
+                                     # Marlin后端在某些情况下速度可提升2-3倍，但可能牺牲部分精度
+
+# GPU 1负责处理的层(12-23层)的线性层设置
+- match:
+    name: "^model\\.layers\\.(1[2-9]|2[0-3])\\.(?!self_attn\\.kv_b_proj).*$"  # 匹配12-23层的线性层
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # KTransformersLinear支持多种量化格式和后端
+    kwargs:
+      generate_device: "cuda:1"      # 生成阶段在GPU 1上处理这些层的线性变换
+      prefill_device: "cuda:1"       # 预填充阶段保持在同一GPU上，减少设备间数据传输
+      generate_op: "KLinearMarlin"   # Marlin后端针对GPU上的线性代数运算做了深度优化
+      prefill_op: "KLinearTorch"     # 对于预填充这种一次性操作，使用PyTorch后端更可靠
+
+# GPU 2负责处理的层(24-35层)的线性层设置
+- match:
+    name: "^model\\.layers\\.(2[4-9]|3[0-5])\\.(?!self_attn\\.kv_b_proj).*$"  # 匹配24-35层的线性层
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # 此实现支持GGML/GGUF量化格式的权重加载
+    kwargs:
+      generate_device: "cuda:2"      # 生成阶段在GPU 2上执行这些层的计算
+      prefill_device: "cuda:2"       # 预填充阶段也在GPU 2上进行，保持计算环境一致
+      generate_op: "KLinearMarlin"   # Marlin基于矩阵乘法融合和共享内存优化，降低内存访问开销
+      prefill_op: "KLinearTorch"     # 对于长序列的预填充，PyTorch后端提供更好的数值稳定性
+
+# GPU 3负责处理的层(36-47层)的线性层设置
+- match:
+    name: "^model\\.layers\\.(3[6-9]|4[0-7])\\.(?!self_attn\\.kv_b_proj).*$"  # 匹配36-47层的线性层
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # 支持异步预取和流水线执行优化
+    kwargs:
+      generate_device: "cuda:3"      # 生成阶段在GPU 3上处理这些层的线性变换
+      prefill_device: "cuda:3"       # 预填充阶段保持在同一GPU上，提高缓存局部性
+      generate_op: "KLinearMarlin"   # Marlin后端支持自动批量处理和高效内存复用
+      prefill_op: "KLinearTorch"     # 使用PyTorch作为预填充后端，避免精度损失
+
+# GPU 4负责处理的层(48-60层)的线性层设置
+- match:
+    name: "^model\\.layers\\.(4[8-9]|5[0-9]|60)\\.(?!self_attn\\.kv_b_proj).*$"  # 匹配48-60层的线性层
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # 在所有GPU上保持一致的实现，简化设计
+    kwargs:
+      generate_device: "cuda:4"      # 生成阶段在GPU 4上执行最后几层的线性变换
+      prefill_device: "cuda:4"       # 预填充阶段也在GPU 4上进行，减少不必要的数据移动
+      generate_op: "KLinearMarlin"   # 保持与其他GPU一致的后端配置
+      prefill_op: "KLinearTorch"     # PyTorch后端作为安全稳定的预填充选择
+
+# === MLP (MoE)整体替换 ===
+# MoE(Mixture of Experts)是DeepSeek-V3的关键创新，整合了门控网络和多个专家网络
+# 与分别配置专家和Gate不同，这里将整个MoE模块作为一个整体进行替换
+# 这种方法可以提供更好的内存管理和更优的性能，特别是在多GPU环境中
+# KDeepseekV3MoE实现了前向/后向路由、专家选择和负载均衡等高级功能
+
+# GPU 0负责处理的层(0-11层)的MoE整体配置
+- match:
+    name: "^model\\.layers\\.([0-9]|1[0-1])\\.mlp$"  # 匹配0-11层的整个MLP模块
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3MoE  # 匹配原始MoE实现
+  replace:
+    class: ktransformers.operators.experts.KDeepseekV3MoEV2  # 替换为优化的MoE实现
+    kwargs:
+      generate_device: "cuda:0"  # 生成阶段在GPU 0上执行
+      prefill_device: "cuda:0"   # 预填充阶段也在GPU 0上执行，保持设备一致性
+
+# GPU 1负责处理的层(12-23层)的MoE整体配置
+- match:
+    name: "^model\\.layers\\.(1[2-9]|2[0-3])\\.mlp$"  # 匹配12-23层的整个MLP模块
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3MoE
+  replace:
+    class: ktransformers.operators.experts.KDeepseekV3MoEV2  # 优化实现支持动态专家选择和负载均衡
+    kwargs:
+      generate_device: "cuda:1"  # 生成阶段在GPU 1上执行MoE计算
+      prefill_device: "cuda:1"   # 预填充阶段也在GPU 1上执行
+
+# GPU 2负责处理的层(24-35层)的MoE整体配置
+- match:
+    name: "^model\\.layers\\.(2[4-9]|3[0-5])\\.mlp$"  # 匹配24-35层的整个MLP模块
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3MoE
+  replace:
+    class: ktransformers.operators.experts.KDeepseekV3MoEV2  # 此实现整合了门控和专家网络的计算
+    kwargs:
+      generate_device: "cuda:2"  # 生成阶段在GPU 2上计算
+      prefill_device: "cuda:2"   # 预填充阶段保持在同一GPU上
+
+# GPU 3负责处理的层(36-47层)的MoE整体配置
+- match:
+    name: "^model\\.layers\\.(3[6-9]|4[0-7])\\.mlp$"  # 匹配36-47层的整个MLP模块
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3MoE
+  replace:
+    class: ktransformers.operators.experts.KDeepseekV3MoEV2  # 支持高效的Top-K专家选择算法
+    kwargs:
+      generate_device: "cuda:3"  # 生成阶段在GPU 3上执行
+      prefill_device: "cuda:3"   # 预填充阶段也在GPU 3上处理
+
+# GPU 4负责处理的层(48-60层)的MoE整体配置
+- match:
+    name: "^model\\.layers\\.(4[8-9]|5[0-9]|60)\\.mlp$"  # 匹配48-60层的整个MLP模块
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3MoE
+  replace:
+    class: ktransformers.operators.experts.KDeepseekV3MoEV2  # 优化版本实现了高效的路由和负载均衡
+    kwargs:
+      generate_device: "cuda:4"  # 生成阶段在GPU 4上计算最后几层
+      prefill_device: "cuda:4"   # 预填充阶段保持在同一GPU上
+
+# === MLP Gate层配置 ===
+# Gate层(路由器)是MoE架构的核心控制组件，负责为每个token动态选择最适合的专家子网络(激活专家)
+# 在DeepSeek-V3模型中，Gate使用线性变换后的softmax函数计算每个专家的路由概率
+# 通常采用Top-K(K=2)稀疏门控策略，即每个token只激活K个专家，其余专家不参与计算
+# 这种稀疏激活机制使得模型可以拥有巨大的参数量，同时保持合理的计算复杂度
+# KMoEGate优化实现提供了以下优势：
+#   1. 高效路由 - 采用优化的Top-K选择算法，减少选择开销
+#   2. 负载均衡 - 通过辅助损失函数促进更均匀的专家使用分布
+#   3. 精度保持 - 确保门控决策与原始模型一致，不损失模型性能
+#   4. 快速计算 - 通过批处理和融合操作加速门控计算
+
+# GPU 0负责处理的层(0-11层)的MLP Gate层设置
+- match:
+    name: "^model\\.layers\\.([0-9]|1[0-1])\\.mlp\\.gate$"  # 匹配0-11层的Gate模块
+    class: ktransformers.models.modeling_deepseek_v3.MoEGate  # 匹配原始Gate实现
+  replace:
+    class: ktransformers.operators.gate.KMoEGate  # 替换为优化的Gate层实现
+    kwargs:
+      generate_device: "cuda:0"      # 生成阶段在GPU 0上执行门控逻辑
+      prefill_device: "cuda:0"       # 预填充阶段也在GPU 0上执行，保持一致性
+
+# GPU 1负责处理的层(12-23层)的MLP Gate层设置
+- match:
+    name: "^model\\.layers\\.(1[2-9]|2[0-3])\\.mlp\\.gate$"  # 匹配12-23层的Gate模块
+    class: ktransformers.models.modeling_deepseek_v3.MoEGate
+  replace:
+    class: ktransformers.operators.gate.KMoEGate  # KMoEGate支持极速Top-K算法，减少选择开销
+    kwargs:
+      generate_device: "cuda:1"      # 生成阶段在GPU 1上执行这些层的门控决策
+      prefill_device: "cuda:1"       # 预填充阶段也在GPU 1上执行，减少跨设备数据移动
+
+# GPU 2负责处理的层(24-35层)的MLP Gate层设置
+- match:
+    name: "^model\\.layers\\.(2[4-9]|3[0-5])\\.mlp\\.gate$"  # 匹配24-35层的Gate模块
+    class: ktransformers.models.modeling_deepseek_v3.MoEGate
+  replace:
+    class: ktransformers.operators.gate.KMoEGate  # 此实现通过批处理和融合操作加速门控计算
+    kwargs:
+      generate_device: "cuda:2"      # 生成阶段在GPU 2上处理这些层的门控
+      prefill_device: "cuda:2"       # 预填充阶段保持在同一GPU上，优化内存访问模式
+
+# GPU 3负责处理的层(36-47层)的MLP Gate层设置
+- match:
+    name: "^model\\.layers\\.(3[6-9]|4[0-7])\\.mlp\\.gate$"  # 匹配36-47层的Gate模块
+    class: ktransformers.models.modeling_deepseek_v3.MoEGate
+  replace:
+    class: ktransformers.operators.gate.KMoEGate  # 支持多种专家分配策略和负载均衡技术
+    kwargs:
+      generate_device: "cuda:3"      # 生成阶段在GPU 3上执行门控计算
+      prefill_device: "cuda:3"       # 预填充阶段也在同一GPU上，减少设备切换开销
+
+# GPU 4负责处理的层(48-60层)的MLP Gate层设置
+- match:
+    name: "^model\\.layers\\.(4[8-9]|5[0-9]|60)\\.mlp\\.gate$"  # 匹配48-60层的Gate模块
+    class: ktransformers.models.modeling_deepseek_v3.MoEGate
+  replace:
+    class: ktransformers.operators.gate.KMoEGate  # 高效实现，支持门控决策的缓存和重用
+    kwargs:
+      generate_device: "cuda:4"      # 生成阶段在GPU 4上处理最后几层的门控决策
+      prefill_device: "cuda:4"       # 预填充阶段也在GPU 4上，保持一致性
+
+# === 注意力层配置 ===
+# 注意力层(Attention)是Transformer架构的核心组件，在DeepSeek-V3模型中采用了MLA(Multi-Layer Attention)技术
+# MLA通过合并注意力网络中的多个层，降低了计算复杂度，提高了信息传递效率
+# 注意力层计算密集但内存占用适中，非常适合放在GPU上以加速处理
+# 在此配置中，我们使用KDeepseekV2Attention替换原始实现，提供更高效的注意力计算
+
+# GPU 0负责处理的层(0-11层)的注意力层设置
+- match:
+    name: "^model\\.layers\\.([0-9]|1[0-1])\\.self_attn$"  # 匹配0-11层的注意力模块
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention  # 替换为优化的DeepSeek V2/V3注意力实现
+    kwargs:
+      generate_device: "cuda:0"     # 生成阶段在GPU 0上执行，以加速注意力权重计算
+      prefill_device: "cuda:0"      # 预填充阶段也在GPU 0上执行，保持设备一致性
+      absorb_for_prefill: False     # 禁用矩阵吸收优化技术，降低内存峰值使用，防止OOM错误,该参数为True时会将K、V矩阵预先合并，节省计算但增加内存消耗
+
+# GPU 1负责处理的层(12-23层)的注意力层设置
+- match:
+    name: "^model\\.layers\\.(1[2-9]|2[0-3])\\.self_attn$"  # 匹配12-23层的注意力模块
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention  # KDeepseekV2Attention实现了FlashAttention算法的变种
+    kwargs:
+      generate_device: "cuda:1"     # 生成阶段在GPU 1上处理这些层的注意力计算
+      prefill_device: "cuda:1"      # 预填充阶段也在同一GPU上，减少跨设备数据传输
+      absorb_for_prefill: False     # 对于多GPU配置，推荐禁用该选项以避免内存压力
+
+# GPU 2负责处理的层(24-35层)的注意力层设置
+- match:
+    name: "^model\\.layers\\.(2[4-9]|3[0-5])\\.self_attn$"  # 匹配24-35层的注意力模块
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention  # 此实现包含注意力掩码、causal掩码和滑动窗口注意力等优化
+    kwargs:
+      generate_device: "cuda:2"     # 生成阶段在GPU 2上计算这些层的注意力
+      prefill_device: "cuda:2"      # 预填充阶段保持在同一GPU上执行
+      absorb_for_prefill: False     # 保持与其他层一致的设置，确保行为一致性
+
+# GPU 3负责处理的层(36-47层)的注意力层设置
+- match:
+    name: "^model\\.layers\\.(3[6-9]|4[0-7])\\.self_attn$"  # 匹配36-47层的注意力模块
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention  # 此实现高度优化，支持高效KV缓存和批量处理
+    kwargs:
+      generate_device: "cuda:3"     # 生成阶段在GPU 3上处理这些层的注意力计算
+      prefill_device: "cuda:3"      # 预填充阶段也在同一GPU上，保持一致性
+      absorb_for_prefill: False     # 禁用吸收优化，在多GPU配置中更为稳定
+
+# GPU 4负责处理的层(48-60层)的注意力层设置
+- match:
+    name: "^model\\.layers\\.(4[8-9]|5[0-9]|60)\\.self_attn$"  # 匹配48-60层的注意力模块
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention  # 支持DeepSeek模型特有的注意力机制实现
+    kwargs:
+      generate_device: "cuda:4"     # 生成阶段在GPU 4上处理最后几层的注意力计算
+      prefill_device: "cuda:4"      # 预填充阶段也在GPU 4上进行
+      absorb_for_prefill: False     # 禁用吸收优化，保持与其他层的配置一致
+
+# === 其他模块默认配置 ===
+# 这部分配置作为"兜底"规则，确保所有未明确指定的模块能被正确分配到对应GPU上
+# DeepSeek-V3模型包含许多小型辅助模块和特殊层，不必为每个模块单独配置
+# 这种设计理念遵循"显式优先，隐式兜底"的原则，既保证关键模块获得定制优化，又确保完整覆盖
+# 默认配置的优势包括：
+#   1. 完整性保证 - 避免某些模块因未配置而使用错误设备，导致跨设备数据传输或运行失败
+#   2. 简化配置 - 无需为每个小型模块编写重复规则，提高配置文件的可维护性
+#   3. 性能一致性 - 确保同一GPU区域内所有模块都在相同设备上运行，减少不必要的数据迁移
+#   4. 错误防护 - 防止因漏配某些模块而导致的运行时错误或性能下降
+
+# GPU 0处理的层(0-11层)的默认模块配置
+- match:
+    name: "^model\\.layers\\.([0-9]|1[0-1])\\."  # 匹配0-11层的任何未指定模块，使用正则表达式精确匹配层号范围，避免重叠
+  replace:
+    class: "default"  # 保持原始类不变，只改变运行设备，"default"表示不替换原始实现，仅修改其运行参数
+    kwargs:
+      generate_device: "cuda:0"  # 生成阶段在GPU 0上执行，与该区域其他模块保持一致
+      prefill_device: "cuda:0"   # 预填充阶段也在GPU 0上执行，确保数据局部性，数据局部性对性能影响巨大，减少跨设备通信可显著提升速度
+
+# GPU 1处理的层(12-23层)的默认模块配置
+- match:
+    name: "^model\\.layers\\.(1[2-9]|2[0-3])\\."  # 匹配12-23层的任何未指定模块，正则表达式"(1[2-9]|2[0-3])"精确匹配12-23这个范围
+  replace:
+    class: "default"  # 不替换模块类型，保留原始实现，这种方式保持模型行为一致性，同时获得设备放置优化
+    kwargs:
+      generate_device: "cuda:1"  # 设置生成阶段使用GPU 1
+      prefill_device: "cuda:1"   # 设置预填充阶段也使用GPU 1，统一使用相同GPU减少设备切换带来的延迟和同步开销
+
+# GPU 2处理的层(24-35层)的默认模块配置
+- match:
+    name: "^model\\.layers\\.(2[4-9]|3[0-5])\\."  # 匹配24-35层的任何未指定模块，该匹配模式涵盖了第三个GPU区域中的所有层
+  replace:
+    class: "default"  # 保留原始实现，仅修改设备配置，这保证了模块的原始功能和行为不受影响
+    kwargs:
+      generate_device: "cuda:2"  # 将生成计算分配到GPU 2
+      prefill_device: "cuda:2"   # 将预填充计算也分配到GPU 2，保持预填充和生成在同一设备上能优化缓存使用
+
+# GPU 3处理的层(36-47层)的默认模块配置
+- match:
+    name: "^model\\.layers\\.(3[6-9]|4[0-7])\\."  # 匹配36-47层的任何未指定模块，此区域包含模型中间后部的层，对生成质量有重要影响
+  replace:
+    class: "default"  # 保持原始模块类型不变，这种策略确保模型行为与原始实现一致，降低不兼容风险
+    kwargs:
+      generate_device: "cuda:3"  # 生成阶段使用GPU 3
+      prefill_device: "cuda:3"   # 预填充阶段同样使用GPU 3，设备一致性减少了张量在设备间移动的需求，提高效率
+
+# GPU 4处理的层(48-60层)的默认模块配置
+- match:
+    name: "^model\\.layers\\.(4[8-9]|5[0-9]|60)\\."  # 匹配48-60层的任何未指定模块，这些是模型的最后几层，对输出质量影响最大
+  replace:
+    class: "default"  # 不更改模块类型，只修改设备分配，保留原始实现对最后几层特别重要，因为它们直接影响生成质量
+    kwargs:
+      generate_device: "cuda:4"  # 生成阶段在GPU 4上执行
+      prefill_device: "cuda:4"   # 预填充阶段也在GPU 4上执行，最终层的计算必须与输出层在同一设备上，避免不必要的数据传输
+
+# === 输出层配置 ===
+# 最后的输出和词表映射层，用于生成最终的token概率
+
+# 词表映射层(lm_head)配置 - 放在最后一个GPU上
+- match:
+    name: "^lm_head"  # 匹配词表映射层(将隐藏状态映射到词表概率)
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear
+    kwargs:
+      generate_device: "cuda:4"  # 放在最后一个GPU上，因为它处理最终输出
+      prefill_device: "cuda:4"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
+
+# 最终规范化层(LayerNorm)配置 - 放在最后一个GPU上
+- match:
+    name: "(^model\\.layers\\.(4[8-9]|5[0-9]|60)\\.)|(^model\\.norm)"  # 匹配最终的规范化层,匹配最后几层或模型的最终norm层
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda:4"  # 与最终层保持在同一GPU上
+      prefill_device: "cuda:4"

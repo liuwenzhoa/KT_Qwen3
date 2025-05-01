@@ -1,0 +1,137 @@
+# Qwen3 MoE 服务优化配置文件
+# 此配置针对Qwen3 MoE模型在单GPU服务场景下的性能优化
+# Qwen3是阿里云开源的大型混合专家模型(MoE)，比起DeepSeek，其具有更简洁的架构设计
+# 适用于单GPU、大内存服务器环境（推荐至少24GB VRAM和128GB RAM）
+
+# === 位置编码配置 ===
+# 旋转位置编码(RoPE)是Transformer模型处理位置信息的关键机制
+# 将Qwen2MoeRotaryEmbedding替换为更通用的RotaryEmbedding实现，可提高计算效率
+- match:
+    class: ktransformers.models.modeling_qwen2_moe.Qwen2MoeRotaryEmbedding  # 匹配原始的Qwen2 RoPE实现
+  replace:
+    class: ktransformers.operators.RoPE.RotaryEmbedding  # 替换为优化的RoPE实现
+    kwargs:
+      generate_device: "cuda"  # 生成阶段在GPU上执行
+      prefill_device: "cuda"   # 预填充阶段也在GPU上执行，确保设备一致性
+
+# === 词表映射层配置 ===
+# 词表映射层(lm_head)是模型最终输出层，将隐藏状态映射到词表概率分布
+# 由于每个token生成都需要此层计算，优化此层对推理速度有显著影响
+- match:
+    name: "^lm_head$"  # 精确匹配lm_head层
+    class: torch.nn.Linear  # 只匹配PyTorch原生线性层类型
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # 替换为优化的线性层实现
+    kwargs:
+      generate_device: "cuda"      # 生成阶段在GPU上执行
+      prefill_device: "cuda"       # 预填充阶段也在GPU上执行
+      generate_op: "VLinearMarlin" # 使用Marlin变种后端，针对输出层优化
+      prefill_op: "KLinearTorch"   # 预填充使用PyTorch后端，提高稳定性
+
+# === 线性层配置 ===
+# 此部分注释掉的配置是另一种可能的线性层优化策略
+# 当前版本不使用这种全局匹配，而是使用下面更精细的配置
+# - match:
+#     name: "^model\\.layers\\..*$"  # regular expression 
+#     class: torch.nn.Linear  # only match modules matching name and class simultaneously
+#   replace:
+#     class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
+#     kwargs:
+#       generate_device: "cuda"
+#       prefill_device: "cuda"
+#       generate_op: "VLinearMarlin"
+#       prefill_op: "KLinearTorch"
+
+# === 精细线性层配置 ===
+# 此配置为模型中所有线性层提供优化，但排除了专家门控层(mlp.shared_expert_gate)
+# 门控层需要特殊处理，因此使用否定前瞻(?!pattern)正则表达式语法排除
+- match:
+    name: "^model\\.layers\\.(?!.*mlp\\.shared_expert_gate).*$"  # 匹配所有层中的线性层，但排除专家门控
+    class: torch.nn.Linear  # 只匹配PyTorch线性层
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # 替换为优化的线性层实现
+    kwargs:
+      generate_device: "cuda"      # 生成阶段在GPU上执行
+      prefill_device: "cuda"       # 预填充阶段也在GPU上执行
+      generate_op: "KLinearMarlin" # 使用Marlin后端，基于CUTLASS优化
+      prefill_op: "KLinearTorch"   # 预填充使用PyTorch后端，提高稳定性
+
+# === MoE块整体配置 ===
+# Qwen3 MoE模型的核心是MoE(Mixture of Experts)模块，整合了门控网络和多个专家网络
+# 将整个MoE模块替换为优化版本，可以更好地管理专家的选择和计算
+- match:
+    name: "^model\\.layers\\..*\\.mlp$"  # 匹配所有层的MLP模块
+    class: ktransformers.models.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock  # 匹配Qwen3的原始MoE实现
+  replace:
+    class: ktransformers.operators.experts.KQwen3MoeSparseMoeBlockV2  # 替换为优化的MoE实现
+    kwargs:
+      generate_device: "cuda"  # 生成阶段在GPU上执行
+      prefill_device: "cuda"   # 预填充阶段也在GPU上执行
+
+# === 专家模块配置 ===
+# 专家模块是MoE架构中最大的计算单元，也是最占用内存的部分
+# 服务场景下，为平衡内存使用，将预填充保留在GPU上，而生成阶段放在CPU上执行
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"  # 匹配所有层的专家模块
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2  # 替换为支持专家并行的优化实现
+    kwargs:
+      prefill_device: "cuda"       # 预填充阶段在GPU上执行，因为预填充只进行一次
+      prefill_op: "KExpertsTorch"  # 预填充使用PyTorch后端，更稳定
+      generate_device: "cpu"       # 生成阶段放在CPU上执行，节省GPU内存
+      generate_op: "KExpertsCPU"   # 使用CPU优化的后端
+      out_device: "cuda"           # 计算结果发送回GPU继续处理
+  recursive: False  # 不递归处理子模块，避免过度注入
+
+# === 注意力层配置 ===
+# 注意力层是Transformer架构的核心组件，对推理性能有重要影响
+# 在服务场景下，使用专门针对Qwen3 MoE优化的注意力实现
+- match:
+    name: "^model\\.layers\\..*\\.self_attn$"  # 匹配所有层的注意力模块
+  replace:
+    class: ktransformers.operators.balance_serve_attention.KQwen3MoeAttention  # 使用平衡服务专用的注意力实现
+    kwargs:
+      generate_device: "cuda"  # 生成阶段在GPU上执行
+      prefill_device: "cuda"   # 预填充阶段也在GPU上执行
+
+# === 模型整体配置 ===
+# 为整个模型对象注入优化，提供全局控制和优化策略
+- match:
+    name: "^model$"  # 匹配整个模型对象
+  replace:
+    class: "ktransformers.operators.models.KQwen2MoeModel"  # 替换为KQwen2MoeModel模型类
+    kwargs:
+      per_layer_prefill_intput_threshold: 0  # 设置为0关闭逐层预填充，降低内存波动
+
+# === 词嵌入层配置 ===
+# 词嵌入层将输入的token ID转换为向量表示，是模型的第一层
+# 将其放在CPU上可以节省GPU内存，因为它只在输入时使用一次
+- match:
+    name: "^model.embed_tokens"  # 匹配词嵌入层
+  replace:
+    class: "default"  # 保持原始类不变，只修改运行设备
+    kwargs:
+      generate_device: "cpu"  # 生成阶段在CPU上运行
+      prefill_device: "cpu"   # 预填充阶段也在CPU上运行
+
+# === 规范化层配置 ===
+# RMSNorm是Qwen3模型使用的规范化方法，比传统LayerNorm计算效率更高
+# 替换为优化版本可提高计算速度并减少内存使用
+- match:
+    class: ktransformers.models.modeling_qwen3_moe.Qwen3MoeRMSNorm  # 匹配原始RMSNorm实现
+  replace:
+    class: ktransformers.operators.layernorm.KQwen3MoeRMSNorm  # 替换为优化的RMSNorm实现
+    kwargs:
+      generate_device: "cuda"  # 生成阶段在GPU上执行
+      prefill_device: "cuda"   # 预填充阶段也在GPU上执行
+
+# === MLP模块配置 ===
+# Qwen3MoeMLP是模型中处理非专家计算的MLP模块
+# 优化此部分可提高非专家计算的效率
+- match:
+    class: ktransformers.models.modeling_qwen3_moe.Qwen3MoeMLP  # 匹配原始MLP实现
+  replace:
+    class: ktransformers.operators.mlp.KQwen2MoeMLP  # 替换为优化的MLP实现
+    kwargs:
+      generate_device: "cuda"  # 生成阶段在GPU上执行
+      prefill_device: "cuda"   # 预填充阶段也在GPU上执行
