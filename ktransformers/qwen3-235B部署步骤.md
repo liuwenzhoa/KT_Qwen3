@@ -194,6 +194,25 @@ pip install ./flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp311-cp311-linux_
 python -c "import flash_attn; print(flash_attn.__version__)"
 ```
 
+# 构建web服务
+```bash
+  # 参考文档：D:\deepseek_ubuntu本地部署\ktransformers\doc\zh\api\server\website.md
+  sudo apt-get update -y && sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
+  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
+  sudo chmod 644 /usr/share/keyrings/nodesource.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_23.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list
+  # 确保安装新版Node.js
+  sudo apt-get update -y
+  sudo apt-get install nodejs -y
+  
+  # 进入网站目录并安装Vue CLI
+  cd /root/autodl-tmp/ktransformers/website
+  npm install @vue/cli
+  
+  # 构建前端项目
+  npm run build
+```
+
 # ktransformers安装步骤
 ```bash
 # 确保conda环境激活
@@ -290,29 +309,12 @@ USE_NUMA=1 USE_BALANCE_SERVE=1 KTRANSFORMERS_FORCE_BUILD=TRUE bash ./install.sh
 export USE_BALANCE_SERVE=1 # 启用多并发支持，实现高效请求处理
 USE_BALANCE_SERVE=1 KTRANSFORMERS_FORCE_BUILD=TRUE bash ./install.sh
 
+# 查看ktransformers安装版本
+pip show ktransformers
 # 验证 ktransformers 安装是否成功
 python -c "import ktransformers; print(ktransformers.__version__)"
 # 验证 NUMA 支持（如果启用了USE_NUMA=1），查看进程的NUMA映射
 test -f /proc/self/numa_maps && echo "NUMA支持已启用" || echo "NUMA未启用"
-```
-
-# 构建web服务
-```bash
-  # 参考文档：D:\deepseek_ubuntu本地部署\ktransformers\doc\zh\api\server\website.md
-  sudo apt-get update -y && sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
-  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
-  sudo chmod 644 /usr/share/keyrings/nodesource.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_23.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list
-  # 确保安装新版Node.js
-  sudo apt-get update -y
-  sudo apt-get install nodejs -y
-  
-  # 进入网站目录并安装Vue CLI
-  cd /root/autodl-tmp/ktransformers/website
-  npm install @vue/cli
-  
-  # 构建前端项目
-  npm run build
 ```
 
 # 启动KTransformers服务（普通版）
@@ -397,6 +399,7 @@ curl http://localhost:10002/v1/models
 # 简单测试
 # 微调参数参考：https://docs.unsloth.ai/basics/qwen3-how-to-run-and-fine-tune
 curl -X POST http://localhost:10002/v1/chat/completions \
+  -H "accept: application/json" \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [
@@ -409,7 +412,8 @@ curl -X POST http://localhost:10002/v1/chat/completions \
     "top_k": 20
   }'
 
-  curl -X POST http://localhost:10002/v1/chat/completions \
+curl -X POST http://localhost:10002/v1/chat/completions \
+  -H "accept: application/json" \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [
@@ -420,7 +424,7 @@ curl -X POST http://localhost:10002/v1/chat/completions \
     "temperature": 0.6,
     "top_p": 0.95,
     "top_k": 20
-  }'
+}'
 ```
 
 # 安装 open-webui
